@@ -26,7 +26,8 @@ class Head(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        #Input and output of shape: (Batch, time, channels)
+        #Input shape: (Batch, Time, Channels)
+        #Output shape: (Batch, Time, Head size)
         B, T, C = x.shape
         q = self.query(x)
         k = self.key(x)
@@ -39,6 +40,21 @@ class Head(nn.Module):
         # perform the weighted aggregation of the values
         v = self.value(x)
         out = att @ v
+        return out
+
+class MultiHeadedAttention(nn.Module):
+    def __init__(self, n_head, n_embd, dropout):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.heads =  nn.ModuleList([Head(head_size) for _ in range(n_head)])
+        self.proj = nn.Linear(head_size * n_head, n_embd) #Trainable projection onto space of embedding dimension
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        #Input shape: (Batch, Time, Channels)
+        #Output shape: (Batch, Time, Embedding Dimension)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
         return out
 
 
