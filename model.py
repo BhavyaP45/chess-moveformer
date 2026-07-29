@@ -13,7 +13,6 @@ class MoveFormerConfig():
     n_embd: int = 384
     dropout: float = 0.2
     vocab_size: int = 29 #All chars found in dataset + '\0' padding character (excludes '\n' delimiter)
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 
