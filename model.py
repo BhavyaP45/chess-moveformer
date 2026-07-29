@@ -148,7 +148,7 @@ class MoveFormerModel(nn.Module):
             B, T, C = logits.shape
             flat_logits = logits.reshape(B * T, C)
             flat_targets = targets.reshape(B * T)
-            loss = F.cross_entropy(flat_logits, flat_targets)
+            loss = F.cross_entropy(flat_logits, flat_targets, ignore_index=0)
 
         return logits, loss
 
