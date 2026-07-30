@@ -12,7 +12,7 @@ class MoveFormerConfig():
     n_head: int = 6
     n_embd: int = 384
     dropout: float = 0.2
-    vocab_size: int = 29 #All chars found in dataset + '\0' padding character (excludes '\n' delimiter)
+    vocab_size: int = 30 # 28 chess chars + PAD + BOS
 
 
 

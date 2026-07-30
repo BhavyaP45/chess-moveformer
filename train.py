@@ -24,6 +24,7 @@ training_config = TrainingConfig()
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DATA_PATH = Path(__file__).parent / "data" / "train.txt"
 PAD_TOKEN = "\0"
+BOS_TOKEN = "\1"
 
 
 def _checkpoint_dir() -> Path:
@@ -32,9 +33,8 @@ def _checkpoint_dir() -> Path:
     return checkpoint_dir
 
 
-def save_checkpoint(model, optimizer, step, train_loss, val_loss, config, is_best=False):
-    prefix = "best_" if is_best else ""
-    filename = f"{prefix}ckpt_step{step}_valloss{val_loss:.4f}.pt"
+def save_checkpoint(model, optimizer, step, train_loss, val_loss, config):
+    filename = f"ckpt_step{step}_valloss{val_loss:.4f}.pt"
     checkpoint = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -51,12 +51,12 @@ def load_latest_checkpoint(model, optimizer):
     if not checkpoints:
         return None
 
-    best_checkpoint = min(
+    selected_checkpoint = min(
         checkpoints,
         key=lambda path: float(path.stem.rsplit("_valloss", 1)[1]),
     )
     checkpoint = torch.load(
-        best_checkpoint,
+        selected_checkpoint,
         map_location=next(model.parameters()).device,
         weights_only=False,
     )
@@ -77,7 +77,7 @@ def _load_training_games() -> tuple[str, ...]:
 
 
 games = _load_training_games()
-chars = [PAD_TOKEN] + sorted({char for game in games for char in game})
+chars = [PAD_TOKEN, BOS_TOKEN] + sorted({char for game in games for char in game})
 vocab_size = len(chars)
 stoi = {char: index for index, char in enumerate(chars)}
 itos = {index: char for char, index in stoi.items()}
@@ -85,7 +85,7 @@ itos = {index: char for char, index in stoi.items()}
 encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
 decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
 
-encoded_games = tuple(bytes(encode(game)) for game in games)
+encoded_games = tuple(bytes(encode(BOS_TOKEN + game)) for game in games)
 split_index = int(0.9 * len(encoded_games))
 train_data = encoded_games[:split_index]
 val_data = encoded_games[split_index:]
@@ -149,7 +149,6 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=training_config.learning_rate)
     resume_step = load_latest_checkpoint(model, optimizer)
     start_step = 0 if resume_step is None else resume_step + 1
-    best_val_loss = float("inf")
     checkpoint_config = {
         "model": asdict(model_config),
         "training": asdict(training_config),
@@ -164,9 +163,6 @@ def train():
             print(f"step {step}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
             save_checkpoint(model, optimizer, step, train_loss, val_loss, checkpoint_config)
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_checkpoint(model, optimizer, step, train_loss, val_loss, checkpoint_config, is_best=True)
 
         inputs, targets = get_batch("train")
         _, loss = model(inputs, targets)
@@ -174,9 +170,9 @@ def train():
         loss.backward()
         optimizer.step()
 
-    context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
+    context = torch.tensor([[stoi[BOS_TOKEN]]], dtype=torch.long, device=DEVICE)
     generated = model.generate(context, max_new_tokens=500)[0].tolist()
-    print(decode(generated))
+    print(decode(generated[1:]))
 
 
 if __name__ == "__main__":
