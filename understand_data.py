@@ -1,4 +1,13 @@
+import os
+from pathlib import Path
+
 import numpy as np
+from dotenv import load_dotenv
+
+
+load_dotenv()
+ROOT_DIR = Path(os.environ["ROOT_DIR"])
+DATA_PATH = ROOT_DIR / "data" / "train.txt"
 
 def compute_block_size(txt_path: str, percentile: float = 95.0):
     with open(txt_path, "r") as f:
@@ -18,9 +27,9 @@ def compute_block_size(txt_path: str, percentile: float = 95.0):
     print(f"Coverage      : {np.mean(lengths <= recommended)*100:.1f}% of games fit fully")
 
 
-compute_block_size("data/train.txt")
+compute_block_size(DATA_PATH)
 
-with open('data/train.txt', 'r', encoding='utf-8') as f:
+with DATA_PATH.open("r", encoding="utf-8") as f:
     text = f.read()
 
 # here are all the unique characters that occur in this text

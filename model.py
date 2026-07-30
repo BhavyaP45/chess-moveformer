@@ -161,6 +161,8 @@ class MoveFormerModel(nn.Module):
             logits, _ = self(idx_cond)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
+            # PAD (0) and BOS (1) are control tokens, not generated text.
+            logits[:, :2] = float("-inf")
             # apply softmax to get probabilities
             probs = F.softmax(logits, dim=-1) # (B, C)
             # sample from the distribution

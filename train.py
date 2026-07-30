@@ -22,13 +22,14 @@ class TrainingConfig:
 
 training_config = TrainingConfig()
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATA_PATH = Path(__file__).parent / "data" / "train.txt"
+ROOT_DIR = Path(os.environ["ROOT_DIR"])
+DATA_PATH = ROOT_DIR / "data" / "train.txt"
 PAD_TOKEN = "\0"
 BOS_TOKEN = "\1"
 
 
 def _checkpoint_dir() -> Path:
-    checkpoint_dir = Path(os.environ["CHECKPOINT_DIR"])
+    checkpoint_dir = ROOT_DIR / os.environ["CHECKPOINT_DIR"]
     os.makedirs(checkpoint_dir, exist_ok=True)
     return checkpoint_dir
 
