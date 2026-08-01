@@ -13,8 +13,9 @@ load_dotenv()
 
 @dataclass
 class TrainingConfig:
-    batch_size: int = 64
-    max_iters: int = 5000
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 8
+    max_iters: int = 15000
     eval_interval: int = 500
     learning_rate: float = 3e-4
     eval_iters: int = 200
@@ -48,6 +49,25 @@ def save_checkpoint(model, optimizer, step, train_loss, val_loss, config):
 
 
 def load_latest_checkpoint(model, optimizer):
+    checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
+    if not checkpoints:
+        return None
+
+    selected_checkpoint = max(
+        checkpoints,
+        key=lambda path: int(path.stem.split("_step", 1)[1].split("_valloss", 1)[0]),
+    )
+    checkpoint = torch.load(
+        selected_checkpoint,
+        map_location=next(model.parameters()).device,
+        weights_only=False,
+    )
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["step"]
+
+
+def load_best_checkpoint(model, optimizer):
     checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
     if not checkpoints:
         return None
@@ -165,10 +185,14 @@ def train():
 
             save_checkpoint(model, optimizer, step, train_loss, val_loss, checkpoint_config)
 
-        inputs, targets = get_batch("train")
-        _, loss = model(inputs, targets)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+
+        for _ in range(training_config.gradient_accumulation_steps):
+            inputs, targets = get_batch("train")
+            _, loss = model(inputs, targets)
+            loss = loss / training_config.gradient_accumulation_steps
+            loss.backward()
+
         optimizer.step()
 
     context = torch.tensor([[stoi[BOS_TOKEN]]], dtype=torch.long, device=DEVICE)
