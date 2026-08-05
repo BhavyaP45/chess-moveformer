@@ -9,80 +9,164 @@ BOS_TOKEN = "\1"
 PAD_TOKEN = "\0"
 
 
+def _generate_moves(model, contexts, stoi, itos, block_size, device, k_values):
+    pad_index = stoi[PAD_TOKEN]
+    bos_index = stoi[BOS_TOKEN]
+    expanded_contexts = []
+    board_indices = []
+    row_k_values = []
+
+    for board_index, context in enumerate(contexts):
+        for k in k_values:
+            expanded_contexts.append(context)
+            board_indices.append(board_index)
+            row_k_values.append(k)
+
+    row_count = len(expanded_contexts)
+    tokens = torch.full((row_count, block_size), pad_index, dtype=torch.long, device=device)
+    lengths = torch.tensor([len(context) for context in expanded_contexts], device=device)
+    k_tensor = torch.tensor(row_k_values, device=device)
+
+    for row, context in enumerate(expanded_contexts):
+        tokens[row, :len(context)] = torch.tensor(context, dtype=torch.long, device=device)
+
+    active = torch.ones(row_count, dtype=torch.bool, device=device)
+    terminated = torch.zeros(row_count, dtype=torch.bool, device=device)
+    generated_moves = [""] * row_count
+    max_k = max(k_values)
+    device_type = torch.device(device).type
+    use_bf16 = device_type == "cuda" and torch.cuda.is_bf16_supported()
+
+    for _ in range(MAX_MOVE_CHARS):
+        active_rows = torch.nonzero(active, as_tuple=False).squeeze(1)
+        if active_rows.numel() == 0:
+            break
+
+        active_lengths = lengths[active_rows]
+        current_width = int(active_lengths.max().item())
+        model_input = tokens[active_rows, :current_width]
+
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=use_bf16):
+            logits, _ = model(model_input)
+
+        batch_rows = torch.arange(active_rows.numel(), device=device)
+        next_logits = logits[batch_rows, active_lengths - 1, :].float()
+        next_logits[:, pad_index] = float("-inf")
+        next_logits[:, bos_index] = float("-inf")
+
+        top_values, top_indices = torch.topk(next_logits, max_k, dim=-1)
+        ranks = torch.arange(max_k, device=device).unsqueeze(0)
+        allowed_ranks = ranks < k_tensor[active_rows].unsqueeze(1)
+        top_values = top_values.masked_fill(~allowed_ranks, float("-inf"))
+        probabilities = torch.softmax(top_values, dim=-1)
+        sampled_ranks = torch.multinomial(probabilities, num_samples=1)
+        next_tokens = top_indices.gather(-1, sampled_ranks).squeeze(1)
+
+        active_row_list = active_rows.tolist()
+        next_token_list = next_tokens.tolist()
+
+        for row, next_token in zip(active_row_list, next_token_list):
+            next_character = itos[next_token]
+            if next_character == " ":
+                active[row] = False
+                terminated[row] = True
+                continue
+
+            generated_moves[row] += next_character
+            length = int(lengths[row].item())
+            if length == block_size:
+                tokens[row, :-1] = tokens[row, 1:].clone()
+                tokens[row, -1] = next_token
+            else:
+                tokens[row, length] = next_token
+                lengths[row] += 1
+
+    return generated_moves, terminated.tolist(), board_indices, row_k_values
+
+
 @torch.no_grad()
-def evaluate_legality(model, val_path, stoi, itos, block_size, device, k_values=[1, 5, 10], n_batches=100, batch_size=64):
+def evaluate_legality(model, val_path, stoi, itos, block_size, device, k_values=[1, 5, 10], n_batches=100, batch_size=64, ply_values=[6, 10, 14, 18, 22]):
     """Measure how often top-k character sampling produces a legal SAN move."""
     with Path(val_path).open("r", encoding="utf-8") as file:
         games = tuple(game for line in file if (game := line.rstrip("\r\n")))
 
-    legal_counts = {k: 0 for k in k_values}
-    evaluated = 0
-    skipped = 0
+    legal_counts = {ply: {k: 0 for k in k_values} for ply in ply_values}
+    evaluated_counts = {ply: 0 for ply in ply_values}
+    skipped_counts = {ply: 0 for ply in ply_values}
     was_training = model.training
     model.eval()
 
     try:
         for _ in range(n_batches):
             game_indices = torch.randint(len(games), (batch_size,))
+            boards = []
+            contexts = []
+            context_plies = []
 
             for game_index in game_indices:
                 moves = games[game_index.item()].split()
-                if len(moves) < 10:
-                    skipped += 1
+                eligible_plies = [ply for ply in ply_values if len(moves) >= ply]
+
+                for ply in ply_values:
+                    if len(moves) < ply:
+                        skipped_counts[ply] += 1
+
+                if not eligible_plies:
                     continue
 
                 board = chess.Board()
-                for san in moves[:10]:
+                eligible_ply_set = set(eligible_plies)
+                for ply, san in enumerate(moves[:max(eligible_plies)], start=1):
                     board.push_san(san)
 
-                context = BOS_TOKEN + " ".join(moves[:10]) + " "
-                context_ids = [stoi[char] for char in context][-block_size:]
-                context_tensor = torch.tensor([context_ids], dtype=torch.long, device=device)
-                evaluated += 1
+                    if ply in eligible_ply_set:
+                        context = BOS_TOKEN + " ".join(moves[:ply]) + " "
+                        context_ids = [stoi[char] for char in context][-block_size:]
+                        boards.append(board.copy(stack=False))
+                        contexts.append(context_ids)
+                        context_plies.append(ply)
+                        evaluated_counts[ply] += 1
 
-                for k in k_values:
-                    generated = context_tensor
-                    generated_move = ""
-                    terminated = False
+            if not contexts:
+                continue
 
-                    for _ in range(MAX_MOVE_CHARS):
-                        logits, _ = model(generated[:, -block_size:])
-                        next_logits = logits[:, -1, :].clone()
-                        next_logits[:, stoi[PAD_TOKEN]] = float("-inf")
-                        next_logits[:, stoi[BOS_TOKEN]] = float("-inf")
+            generated_moves, terminated, board_indices, row_k_values = _generate_moves(
+                model, contexts, stoi, itos, block_size, device, k_values
+            )
 
-                        top_values, top_indices = torch.topk(next_logits, k, dim=-1)
-                        probabilities = torch.softmax(top_values, dim=-1)
-                        sampled_rank = torch.multinomial(probabilities, num_samples=1)
-                        next_token = top_indices.gather(-1, sampled_rank)
-                        next_character = itos[next_token.item()]
+            for generated_move, did_terminate, board_index, k in zip(
+                generated_moves, terminated, board_indices, row_k_values
+            ):
+                if not did_terminate:
+                    continue
 
-                        if next_character == " ":
-                            terminated = True
-                            break
-
-                        generated_move += next_character
-                        generated = torch.cat((generated, next_token), dim=1)
-
-                    if not terminated:
-                        continue
-
-                    try:
-                        board.parse_san(generated_move)
-                        legal_counts[k] += 1
-                    except ValueError:
-                        pass
+                try:
+                    boards[board_index].parse_san(generated_move)
+                    ply = context_plies[board_index]
+                    legal_counts[ply][k] += 1
+                except ValueError:
+                    pass
     finally:
         model.train(was_training)
 
     legality_rates = {
-        k: 100.0 * legal_counts[k] / evaluated if evaluated else 0.0
-        for k in k_values
+        ply: {
+            k: 100.0 * legal_counts[ply][k] / evaluated_counts[ply]
+            if evaluated_counts[ply]
+            else 0.0
+            for k in k_values
+        }
+        for ply in ply_values
     }
 
-    print("Top-k move legality")
-    print(f"{'k':<6}{'Legal':<10}{'Evaluated':<12}{'Skipped':<10}{'Rate':>8}")
-    for k in k_values:
-        print(f"{k:<6}{legal_counts[k]:<10}{evaluated:<12}{skipped:<10}{legality_rates[k]:>7.2f}%")
+    print("Top-k move legality by context length")
+    print(f"{'Plies':<8}{'k':<6}{'Legal':<10}{'Evaluated':<12}{'Skipped':<10}{'Rate':>8}")
+    for ply in ply_values:
+        for k in k_values:
+            print(
+                f"{ply:<8}{k:<6}{legal_counts[ply][k]:<10}"
+                f"{evaluated_counts[ply]:<12}{skipped_counts[ply]:<10}"
+                f"{legality_rates[ply][k]:>7.2f}%"
+            )
 
     return legality_rates
