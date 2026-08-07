@@ -4,3 +4,5 @@ data/
 .venv
 .vscode/settings.json
 .env
+
+validate_game.py

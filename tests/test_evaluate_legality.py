@@ -61,10 +61,12 @@ class EvaluateLegalityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_directory:
             val_path = Path(temp_directory) / "val.txt"
             val_path.write_text(contents, encoding="utf-8")
-            sampled_indices = torch.arange(batch_size) % len(contents.splitlines())
 
             output = io.StringIO()
-            with patch("evaluate_legality.torch.randint", return_value=sampled_indices):
+            def sample_indices(high, size):
+                return torch.arange(size[0]) % high
+
+            with patch("evaluate_legality.torch.randint", side_effect=sample_indices):
                 with redirect_stdout(output):
                     rates = evaluate_legality(
                         model,
@@ -107,7 +109,7 @@ class EvaluateLegalityTests(unittest.TestCase):
         self.assertEqual(illegal_rates, {10: {1: 0.0, 5: 0.0, 10: 0.0}})
         self.assertEqual(unterminated_rates, {10: {1: 0.0, 5: 0.0, 10: 0.0}})
 
-    def test_short_games_are_excluded_and_reported(self):
+    def test_short_games_are_prefiltered_without_reducing_sample_count(self):
         model = ScriptedModel("Re1 ")
         rates, output = self.evaluate(
             SHORT_GAME + "\n" + LONG_GAME + "\n",
@@ -117,7 +119,8 @@ class EvaluateLegalityTests(unittest.TestCase):
         )
 
         self.assertEqual(rates, {10: {1: 100.0}})
-        self.assertIn("10      1     1         1           1", output)
+        self.assertIn("10      1     2         2", output)
+        self.assertNotIn("Skipped", output)
 
     def test_evaluates_all_default_ply_depths(self):
         model = ScriptedModel({6: "Ba4 ", 10: "Re1 ", 14: "c3 ", 18: "d4 ", 22: "Nc3 "})

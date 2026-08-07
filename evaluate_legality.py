@@ -85,50 +85,42 @@ def _generate_moves(model, contexts, stoi, itos, block_size, device, k_values):
 
 
 @torch.no_grad()
-def evaluate_legality(model, val_path, stoi, itos, block_size, device, k_values=[1, 5, 10], n_batches=100, batch_size=64, ply_values=[6, 10, 14, 18, 22]):
+def evaluate_legality(model, val_path, stoi, itos, block_size, device, k_values=[1, 5, 10], n_batches=100, batch_size=64, ply_values=[6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50]):
     """Measure how often top-k character sampling produces a legal SAN move."""
     with Path(val_path).open("r", encoding="utf-8") as file:
-        games = tuple(game for line in file if (game := line.rstrip("\r\n")))
+        games = tuple(game.split() for line in file if (game := line.rstrip("\r\n")))
 
+    eligible_games = {
+        ply: tuple(game for game in games if len(game) >= ply)
+        for ply in ply_values
+    }
     legal_counts = {ply: {k: 0 for k in k_values} for ply in ply_values}
     evaluated_counts = {ply: 0 for ply in ply_values}
-    skipped_counts = {ply: 0 for ply in ply_values}
     was_training = model.training
     model.eval()
 
     try:
         for _ in range(n_batches):
-            game_indices = torch.randint(len(games), (batch_size,))
             boards = []
             contexts = []
             context_plies = []
 
-            for game_index in game_indices:
-                moves = games[game_index.item()].split()
-                eligible_plies = [ply for ply in ply_values if len(moves) >= ply]
+            for target_ply in ply_values:
+                data = eligible_games[target_ply]
+                game_indices = torch.randint(len(data), (batch_size,))
 
-                for ply in ply_values:
-                    if len(moves) < ply:
-                        skipped_counts[ply] += 1
+                for game_index in game_indices:
+                    moves = data[game_index.item()]
+                    board = chess.Board()
+                    for san in moves[:target_ply]:
+                        board.push_san(san)
 
-                if not eligible_plies:
-                    continue
-
-                board = chess.Board()
-                eligible_ply_set = set(eligible_plies)
-                for ply, san in enumerate(moves[:max(eligible_plies)], start=1):
-                    board.push_san(san)
-
-                    if ply in eligible_ply_set:
-                        context = BOS_TOKEN + " ".join(moves[:ply]) + " "
-                        context_ids = [stoi[char] for char in context][-block_size:]
-                        boards.append(board.copy(stack=False))
-                        contexts.append(context_ids)
-                        context_plies.append(ply)
-                        evaluated_counts[ply] += 1
-
-            if not contexts:
-                continue
+                    context = BOS_TOKEN + " ".join(moves[:target_ply]) + " "
+                    context_ids = [stoi[char] for char in context][-block_size:]
+                    boards.append(board)
+                    contexts.append(context_ids)
+                    context_plies.append(target_ply)
+                    evaluated_counts[target_ply] += 1
 
             generated_moves, terminated, board_indices, row_k_values = _generate_moves(
                 model, contexts, stoi, itos, block_size, device, k_values
@@ -160,13 +152,12 @@ def evaluate_legality(model, val_path, stoi, itos, block_size, device, k_values=
     }
 
     print("Top-k move legality by context length")
-    print(f"{'Plies':<8}{'k':<6}{'Legal':<10}{'Evaluated':<12}{'Skipped':<10}{'Rate':>8}")
+    print(f"{'Plies':<8}{'k':<6}{'Legal':<10}{'Evaluated':<12}{'Rate':>8}")
     for ply in ply_values:
         for k in k_values:
             print(
                 f"{ply:<8}{k:<6}{legal_counts[ply][k]:<10}"
-                f"{evaluated_counts[ply]:<12}{skipped_counts[ply]:<10}"
-                f"{legality_rates[ply][k]:>7.2f}%"
+                f"{evaluated_counts[ply]:<12}{legality_rates[ply][k]:>7.2f}%"
             )
 
     return legality_rates
