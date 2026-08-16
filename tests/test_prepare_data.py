@@ -7,7 +7,7 @@ import chess.pgn
 import zstandard
 from tqdm import tqdm
 
-import prepare_data
+from preprocessing import prepare_data
 
 
 LONG_GAME = (

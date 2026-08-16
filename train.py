@@ -67,6 +67,25 @@ def load_latest_checkpoint(model, optimizer):
     return checkpoint["step"]
 
 
+def load_step_0_checkpoint(model, optimizer):
+    checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
+    if not checkpoints:
+        return None
+
+    selected_checkpoint = min(
+        checkpoints,
+        key=lambda path: int(path.stem.split("_step", 1)[1].split("_valloss", 1)[0]),
+    )
+    checkpoint = torch.load(
+        selected_checkpoint,
+        map_location=next(model.parameters()).device,
+        weights_only=False,
+    )
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["step"]
+
+
 def load_best_checkpoint(model, optimizer):
     checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
     if not checkpoints:
