@@ -1,7 +1,7 @@
-from pathlib import Path
-
 import chess
 import torch
+
+from project_utils import load_games
 
 
 MAX_MOVE_CHARS = 16
@@ -87,8 +87,7 @@ def _generate_moves(model, contexts, stoi, itos, block_size, device, k_values):
 @torch.no_grad()
 def evaluate_legality(model, val_path, stoi, itos, block_size, device, k_values=[1, 5, 10], n_batches=100, batch_size=64, ply_values=[6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50]):
     """Measure how often top-k character sampling produces a legal SAN move."""
-    with Path(val_path).open("r", encoding="utf-8") as file:
-        games = tuple(game.split() for line in file if (game := line.rstrip("\r\n")))
+    games = tuple(game.split() for game in load_games(val_path))
 
     eligible_games = {
         ply: tuple(game for game in games if len(game) >= ply)

@@ -1,13 +1,11 @@
-import os
 from pathlib import Path
 
 import chess
 import numpy as np
-from dotenv import load_dotenv
 
+from project_utils import root_dir
 
-load_dotenv()
-ROOT_DIR = Path(os.environ["ROOT_DIR"])
+ROOT_DIR = root_dir()
 DATA_PATH = ROOT_DIR / "data" / "train.txt"
 
 

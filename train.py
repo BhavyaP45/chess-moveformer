@@ -1,14 +1,16 @@
 from dataclasses import asdict, dataclass
-import os
-from pathlib import Path
 
 import torch
-from dotenv import load_dotenv
 
 from model import MoveFormerConfig, MoveFormerModel
-
-
-load_dotenv()
+from project_utils import (
+    load_best_checkpoint,
+    load_games,
+    load_latest_checkpoint,
+    load_step_0_checkpoint,
+    root_dir,
+    save_checkpoint,
+)
 
 
 @dataclass
@@ -23,100 +25,13 @@ class TrainingConfig:
 
 training_config = TrainingConfig()
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-ROOT_DIR = Path(os.environ["ROOT_DIR"])
+ROOT_DIR = root_dir()
 DATA_PATH = ROOT_DIR / "data" / "train.txt"
 PAD_TOKEN = "\0"
 BOS_TOKEN = "\1"
 
 
-def _checkpoint_dir() -> Path:
-    checkpoint_dir = ROOT_DIR / os.environ["CHECKPOINT_DIR"]
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    return checkpoint_dir
-
-
-def save_checkpoint(model, optimizer, step, train_loss, val_loss, config):
-    filename = f"ckpt_step{step}_valloss{val_loss:.4f}.pt"
-    checkpoint = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "step": step,
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-        "config": config,
-    }
-    torch.save(checkpoint, _checkpoint_dir() / filename)
-
-
-def load_latest_checkpoint(model, optimizer):
-    checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
-    if not checkpoints:
-        return None
-
-    selected_checkpoint = max(
-        checkpoints,
-        key=lambda path: int(path.stem.split("_step", 1)[1].split("_valloss", 1)[0]),
-    )
-    checkpoint = torch.load(
-        selected_checkpoint,
-        map_location=next(model.parameters()).device,
-        weights_only=False,
-    )
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    return checkpoint["step"]
-
-
-def load_step_0_checkpoint(model, optimizer):
-    checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
-    if not checkpoints:
-        return None
-
-    selected_checkpoint = min(
-        checkpoints,
-        key=lambda path: int(path.stem.split("_step", 1)[1].split("_valloss", 1)[0]),
-    )
-    checkpoint = torch.load(
-        selected_checkpoint,
-        map_location=next(model.parameters()).device,
-        weights_only=False,
-    )
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    return checkpoint["step"]
-
-
-def load_best_checkpoint(model, optimizer):
-    checkpoints = list(_checkpoint_dir().glob("*ckpt_step*_valloss*.pt"))
-    if not checkpoints:
-        return None
-
-    selected_checkpoint = min(
-        checkpoints,
-        key=lambda path: float(path.stem.rsplit("_valloss", 1)[1]),
-    )
-    checkpoint = torch.load(
-        selected_checkpoint,
-        map_location=next(model.parameters()).device,
-        weights_only=False,
-    )
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    return checkpoint["step"]
-
-
-def _load_training_games() -> tuple[str, ...]:
-    """Load the corpus once; get_batch samples from this in-memory tuple."""
-    with DATA_PATH.open("r", encoding="utf-8") as file:
-        games = tuple(
-            game
-            for line in file
-            if (game := line.rstrip("\r\n"))
-        )
-    return games
-
-
-games = _load_training_games()
+games = load_games(DATA_PATH)
 chars = [PAD_TOKEN, BOS_TOKEN] + sorted({char for game in games for char in game})
 vocab_size = len(chars)
 stoi = {char: index for index, char in enumerate(chars)}

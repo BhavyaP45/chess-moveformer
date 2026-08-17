@@ -1,26 +1,18 @@
-import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import chess
 import numpy as np
 import torch
-from dotenv import load_dotenv
 
 from model import MoveFormerConfig, MoveFormerModel
+from project_utils import find_best_checkpoint, load_games, read_checkpoint, root_dir
 
-
-load_dotenv()
-
-N_GAMES = 3000
+N_GAMES = 4000
 BATCH_SIZE = 256
 CONTEXT_LENGTH = 768
+MIN_GAME_PLIES = 51
 OUTPUT_FILENAME = "activations.npz"
-CHECKPOINT_PATTERN = re.compile(
-    r"^(?:best_)?ckpt_step(?P<step>\d+)_valloss"
-    r"(?P<val_loss>-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\.pt$"
-)
 
 
 @dataclass
@@ -32,31 +24,9 @@ class PreparedGame:
     game_id: int
 
 
-def _root_dir() -> Path:
-    return Path(os.environ["ROOT_DIR"])
-
-
-def _checkpoint_dir() -> Path:
-    checkpoint_dir = Path(os.environ["CHECKPOINT_DIR"])
-    return checkpoint_dir if checkpoint_dir.is_absolute() else _root_dir() / checkpoint_dir
-
-
-def _find_best_checkpoint() -> Path:
-    candidates = []
-    for checkpoint_path in _checkpoint_dir().glob("*.pt"):
-        match = CHECKPOINT_PATTERN.fullmatch(checkpoint_path.name)
-        if match is not None:
-            candidates.append((float(match.group("val_loss")), checkpoint_path))
-
-    if not candidates:
-        raise FileNotFoundError(f"No valid checkpoints found in {_checkpoint_dir()}")
-
-    return min(candidates, key=lambda candidate: candidate[0])[1]
-
-
 def _load_model(device):
-    checkpoint_path = _find_best_checkpoint()
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint_path = find_best_checkpoint()
+    checkpoint = read_checkpoint(checkpoint_path)
     saved_config = checkpoint["config"]
     model_values = saved_config["model"]
     config = MoveFormerConfig(**model_values)
@@ -127,9 +97,7 @@ def _prepare_game(game_text: str, game_id: int, stoi, context_length: int):
 
 
 def _sample_valid_games(data_path: Path, stoi, context_length: int):
-    with data_path.open("r", encoding="utf-8") as file:
-        games = tuple(game for line in file if (game := line.rstrip("\r\n")))
-
+    games = load_games(data_path, min_plies=MIN_GAME_PLIES)
     sampled_games = []
     for game_id in np.random.default_rng().permutation(len(games)):
         prepared = _prepare_game(games[game_id], int(game_id), stoi, context_length)
@@ -156,7 +124,7 @@ def extract_activations():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, config, stoi, _ = _load_model(device)
     context_length = min(CONTEXT_LENGTH, config.block_size)
-    data_path = _root_dir() / "data" / "train.txt"
+    data_path = root_dir() / "data" / "val.txt"
     games = _sample_valid_games(data_path, stoi, context_length)
     use_cuda = device.type == "cuda"
     use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
@@ -240,7 +208,7 @@ def extract_activations():
     plies = np.concatenate(ply_batches).astype(np.int16, copy=False)
     game_ids = np.concatenate(game_id_batches).astype(np.int32, copy=False)
 
-    output_path = _root_dir() / OUTPUT_FILENAME
+    output_path = root_dir() / OUTPUT_FILENAME
     np.savez_compressed(
         output_path,
         activations=activations,

@@ -56,7 +56,7 @@ class ExtractActivationsTests(unittest.TestCase):
             data_dir = root / "data"
             checkpoint_dir.mkdir()
             data_dir.mkdir()
-            (data_dir / "train.txt").write_text(
+            (data_dir / "val.txt").write_text(
                 "e4 e5 Nf3 Nc6\nd4 d5 c4 e6\n",
                 encoding="utf-8",
             )
@@ -91,9 +91,10 @@ class ExtractActivationsTests(unittest.TestCase):
             ):
                 with patch.object(extract_activations, "N_GAMES", 2):
                     with patch.object(extract_activations, "BATCH_SIZE", 2):
-                        with patch.object(extract_activations, "CONTEXT_LENGTH", 16):
-                            with redirect_stdout(io.StringIO()):
-                                output_path = extract_activations.extract_activations()
+                        with patch.object(extract_activations, "MIN_GAME_PLIES", 0):
+                            with patch.object(extract_activations, "CONTEXT_LENGTH", 16):
+                                with redirect_stdout(io.StringIO()):
+                                    output_path = extract_activations.extract_activations()
 
             with np.load(output_path) as arrays:
                 self.assertEqual(arrays["activations"].shape, (6, 2, 8))

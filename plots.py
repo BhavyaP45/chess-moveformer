@@ -1,19 +1,11 @@
-import os
-import re
 import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
-from dotenv import load_dotenv
 
+from project_utils import checkpoint_dir, checkpoint_metadata, read_checkpoint, root_dir
 
-load_dotenv()
-
-CHECKPOINT_PATTERN = re.compile(
-    r"^(?P<best>best_)?ckpt_step(?P<step>\d+)_valloss"
-    r"(?P<val_loss>-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\.pt$"
-)
 LEGALITY_RATES = {
     6: {1: 99.9140625, 5: 99.6328125, 10: 99.640625},
     10: {1: 99.296875, 5: 98.484375, 10: 98.078125},
@@ -43,17 +35,8 @@ PLOT_STYLE = {
 }
 
 
-def _root_dir() -> Path:
-    return Path(os.environ["ROOT_DIR"])
-
-
-def _checkpoint_dir() -> Path:
-    checkpoint_dir = Path(os.environ["CHECKPOINT_DIR"])
-    return checkpoint_dir if checkpoint_dir.is_absolute() else _root_dir() / checkpoint_dir
-
-
 def _figures_dir() -> Path:
-    figures_dir = _root_dir() / "figures"
+    figures_dir = root_dir() / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     return figures_dir
 
@@ -61,29 +44,27 @@ def _figures_dir() -> Path:
 def _checkpoint_records():
     records_by_step = {}
 
-    for checkpoint_path in _checkpoint_dir().glob("*.pt"):
-        match = CHECKPOINT_PATTERN.fullmatch(checkpoint_path.name)
-        if match is None:
+    for checkpoint_path in checkpoint_dir().glob("*.pt"):
+        metadata = checkpoint_metadata(checkpoint_path)
+        if metadata is None:
             warnings.warn(f"Ignoring malformed checkpoint filename: {checkpoint_path.name}")
             continue
 
-        step = int(match.group("step"))
         record = {
             "path": checkpoint_path,
-            "step": step,
-            "val_loss": float(match.group("val_loss")),
-            "is_best": match.group("best") is not None,
+            **metadata,
         }
+        step = metadata["step"]
         existing = records_by_step.get(step)
         if existing is None or existing["is_best"] and not record["is_best"]:
             records_by_step[step] = record
 
     if not records_by_step:
-        raise FileNotFoundError(f"No valid checkpoints found in {_checkpoint_dir()}")
+        raise FileNotFoundError(f"No valid checkpoints found in {checkpoint_dir()}")
 
     records = sorted(records_by_step.values(), key=lambda record: record["step"])
     for record in records:
-        checkpoint = torch.load(record["path"], map_location="cpu", weights_only=False)
+        checkpoint = read_checkpoint(record["path"])
         if "train_loss" not in checkpoint:
             raise KeyError(f"Checkpoint has no train_loss: {record['path']}")
         train_loss = checkpoint["train_loss"]
