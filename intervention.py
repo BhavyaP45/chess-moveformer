@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from evaluate_legality import _generate_moves
 from model import MoveFormerConfig, MoveFormerModel
 from project_utils import find_best_checkpoint, iter_games, read_checkpoint, root_dir
 
@@ -18,6 +17,7 @@ RANDOM_STATE = 42
 BOS_TOKEN = "\1"
 SCALES = (0.5, 1.0, 2.0)
 PRIMARY_SCALE = 1.0
+MAX_MOVE_CHARS = 16
 PLY_RANGE = (15, 45)
 NON_KING_CLASSES = (1, 2, 3, 4, 5, 7, 8, 9, 10, 11)
 EXAMPLE_CSV = "causal_empty_intervention_examples_v4.csv"
@@ -136,6 +136,16 @@ def _load_transformer(device):
     return model, config, stoi, itos
 
 
+def require_cuda():
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is required for greedy-plan discovery and causal interventions"
+        )
+    device = torch.device("cuda")
+    print(f"Using CUDA device: {torch.cuda.get_device_name(device)}")
+    return device
+
+
 def sample_candidate_positions(games, stoi, block_size, pool_size=40000):
     rng = np.random.default_rng(RANDOM_STATE)
     reservoir = []
@@ -184,31 +194,122 @@ def generate_greedy_moves(
     batch_size=50,
 ):
     moves = [None] * len(samples)
+    ordered_indices = sorted(range(len(samples)), key=lambda index: len(samples[index].context))
     with torch.inference_mode():
-        for start in range(0, len(samples), batch_size):
-            batch = samples[start : start + batch_size]
-            generated, terminated, board_indices, _ = _generate_moves(
+        for start in range(0, len(ordered_indices), batch_size):
+            batch_indices = ordered_indices[start : start + batch_size]
+            batch = [samples[index] for index in batch_indices]
+            generated, terminated = _generate_greedy_batch(
                 model,
                 [sample.context for sample in batch],
                 stoi,
                 itos,
                 block_size,
                 device,
-                [1],
             )
-            for move_text, did_terminate, board_index in zip(
-                generated, terminated, board_indices
+            for move_text, did_terminate, sample_index, sample in zip(
+                generated, terminated, batch_indices, batch
             ):
                 if not did_terminate:
                     continue
                 try:
-                    moves[start + board_index] = batch[board_index].board.parse_san(
-                        move_text
-                    )
+                    moves[sample_index] = sample.board.parse_san(move_text)
                 except ValueError:
                     pass
-            print(f"{label}: {min(start + batch_size, len(samples))}/{len(samples)}")
+            print(
+                f"{label}: "
+                f"{min(start + batch_size, len(ordered_indices))}/{len(ordered_indices)}"
+            )
     return moves
+
+
+def _generate_greedy_batch(model, contexts, stoi, itos, block_size, device):
+    row_count = len(contexts)
+    if row_count == 0:
+        return [], []
+
+    pad_index = stoi["\0"]
+    bos_index = stoi[BOS_TOKEN]
+    space_index = stoi[" "]
+    tokens = torch.full(
+        (row_count, block_size),
+        pad_index,
+        dtype=torch.long,
+        device=device,
+    )
+    lengths = torch.tensor(
+        [len(context) for context in contexts],
+        dtype=torch.long,
+        device=device,
+    )
+    for row, context in enumerate(contexts):
+        tokens[row, : len(context)] = torch.tensor(
+            context, dtype=torch.long, device=device
+        )
+
+    active = torch.ones(row_count, dtype=torch.bool, device=device)
+    terminated = torch.zeros(row_count, dtype=torch.bool, device=device)
+    generated_tokens = torch.full(
+        (row_count, MAX_MOVE_CHARS),
+        pad_index,
+        dtype=torch.long,
+        device=device,
+    )
+    generated_lengths = torch.zeros(row_count, dtype=torch.long, device=device)
+    device_type = torch.device(device).type
+    use_bf16 = device_type == "cuda" and torch.cuda.is_bf16_supported()
+
+    for step in range(MAX_MOVE_CHARS):
+        active_rows = torch.nonzero(active, as_tuple=False).squeeze(1)
+        if active_rows.numel() == 0:
+            break
+        active_lengths = lengths[active_rows]
+        current_width = int(active_lengths.max().item())
+        model_input = tokens[active_rows, :current_width]
+        with torch.autocast(
+            device_type=device_type,
+            dtype=torch.bfloat16,
+            enabled=use_bf16,
+        ):
+            logits, _ = model(model_input)
+        batch_rows = torch.arange(active_rows.numel(), device=device)
+        next_logits = logits[batch_rows, active_lengths - 1].float()
+        next_logits[:, pad_index] = float("-inf")
+        next_logits[:, bos_index] = float("-inf")
+        next_tokens = torch.argmax(next_logits, dim=-1)
+
+        ending = next_tokens == space_index
+        ending_rows = active_rows[ending]
+        terminated[ending_rows] = True
+        active[ending_rows] = False
+
+        continuing_rows = active_rows[~ending]
+        continuing_tokens = next_tokens[~ending]
+        if continuing_rows.numel() == 0:
+            continue
+        generated_tokens[continuing_rows, step] = continuing_tokens
+        generated_lengths[continuing_rows] += 1
+
+        full = lengths[continuing_rows] == block_size
+        full_rows = continuing_rows[full]
+        if full_rows.numel():
+            tokens[full_rows, :-1] = tokens[full_rows, 1:].clone()
+            tokens[full_rows, -1] = continuing_tokens[full]
+        growing_rows = continuing_rows[~full]
+        if growing_rows.numel():
+            tokens[growing_rows, lengths[growing_rows]] = continuing_tokens[~full]
+            lengths[growing_rows] += 1
+
+    generated_cpu = generated_tokens.cpu()
+    generated_length_cpu = generated_lengths.cpu().tolist()
+    generated = [
+        "".join(
+            itos[int(token)]
+            for token in generated_cpu[row, :generated_length_cpu[row]]
+        )
+        for row in range(row_count)
+    ]
+    return generated, terminated.cpu().tolist()
 
 
 def select_control_square(board, greedy_move, game_id=0, ply=0):
@@ -873,10 +974,11 @@ def run_interventions(
     per_piece=400,
     candidate_pool=40000,
     batch_size=50,
+    discovery_batch_size=2048,
     min_centroid_support=100,
     output_dir=None,
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = require_cuda()
     output_dir = Path(output_dir) if output_dir else root_dir()
     model, config, stoi, itos = _load_transformer(device)
 
@@ -905,7 +1007,7 @@ def run_interventions(
         itos,
         config.block_size,
         device,
-        batch_size,
+        discovery_batch_size,
     )
     target_keys = {
         key
@@ -1012,6 +1114,7 @@ def main():
     parser.add_argument("--per-piece", type=int, default=400)
     parser.add_argument("--candidate-pool", type=int, default=200000)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--discovery-batch-size", type=int, default=2048)
     parser.add_argument("--min-centroid-support", type=int, default=100)
     parser.add_argument("--output-dir", type=Path, default=None)
     args = parser.parse_args()
@@ -1019,6 +1122,7 @@ def main():
         per_piece=args.per_piece,
         candidate_pool=args.candidate_pool,
         batch_size=args.batch_size,
+        discovery_batch_size=args.discovery_batch_size,
         min_centroid_support=args.min_centroid_support,
         output_dir=args.output_dir,
     )

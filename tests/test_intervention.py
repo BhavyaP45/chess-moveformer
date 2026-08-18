@@ -148,6 +148,16 @@ def test_centroid_edit_moves_only_along_axis_at_requested_scale():
     assert torch.allclose(centroid_progress(exact, spec), torch.tensor([1.0]))
 
 
+def test_experiment_requires_cuda_instead_of_falling_back_to_cpu(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    try:
+        intervention.require_cuda()
+    except RuntimeError as error:
+        assert "CUDA is required" in str(error)
+    else:
+        raise AssertionError("Expected the experiment to reject CPU execution")
+
+
 def test_centroid_specs_use_specific_piece_not_all_occupied():
     activations = np.array(
         [
@@ -330,10 +340,12 @@ def test_candidate_sampling_and_greedy_generation_end_to_end():
     assert candidates[0].context[-1] == STOI[" "]
 
     sample = _position()
+    longer_sample = _position(game_id=1)
+    longer_sample.context = [STOI["\1"], STOI[" "], STOI[" "]]
     with redirect_stdout(io.StringIO()):
         moves = generate_greedy_moves(
             ScriptedMoveModel(),
-            [sample],
+            [longer_sample, sample],
             STOI,
             ITOS,
             block_size=16,
@@ -341,4 +353,5 @@ def test_candidate_sampling_and_greedy_generation_end_to_end():
             label="test",
             batch_size=1,
         )
-    assert moves == [sample.board.parse_san("e4")]
+    expected = sample.board.parse_san("e4")
+    assert moves == [expected, expected]
