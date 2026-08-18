@@ -8,6 +8,7 @@ from project_utils import (
     find_best_checkpoint,
     find_latest_checkpoint,
     find_step_0_checkpoint,
+    iter_games,
     load_games,
 )
 
@@ -45,6 +46,18 @@ class ProjectUtilsTests(unittest.TestCase):
             )
 
             self.assertEqual(load_games(data_path, min_plies=51), (fifty_one_plies,))
+
+    def test_iter_games_streams_nonempty_games(self):
+        with tempfile.TemporaryDirectory() as temp_directory:
+            data_path = Path(temp_directory) / "games.txt"
+            data_path.write_text("e4 e5\n\nd4 d5\n", encoding="utf-8")
+
+            games = iter_games(data_path)
+            self.assertNotIsInstance(games, tuple)
+            self.assertEqual(next(games), "e4 e5")
+            self.assertEqual(next(games), "d4 d5")
+            with self.assertRaises(StopIteration):
+                next(games)
 
 
 if __name__ == "__main__":

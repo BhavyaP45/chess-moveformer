@@ -125,6 +125,23 @@ def _weighted_loss(logits, targets, class_weights):
     return (losses * sample_weights).sum() / sample_weights.sum()
 
 
+def _evaluate_loss(model, activations, targets, class_weights, batch_size, device, use_bf16):
+    total_loss = 0.0
+    total_weight = 0
+    model.eval()
+    with torch.inference_mode():
+        for start in range(0, len(activations), batch_size):
+            batch = activations[start:start + batch_size]
+            batch_targets = targets[start:start + batch_size]
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
+                logits = model(batch)
+                loss = _weighted_loss(logits, batch_targets, class_weights)
+            total_loss += loss.item() * len(batch)
+            total_weight += len(batch)
+    model.train()
+    return total_loss / max(total_weight, 1)
+
+
 def _predict(model, activations, batch_size, device, use_bf16):
     predictions = []
     model.eval()
@@ -136,7 +153,20 @@ def _predict(model, activations, batch_size, device, use_bf16):
     return torch.cat(predictions).numpy()
 
 
-def _train_layer(x_train, train_labels, baseline_labels, n_squares, n_features, device, epochs, batch_size, learning_rate, layer):
+def _train_layer(
+    x_train,
+    train_labels,
+    baseline_labels,
+    x_val,
+    val_labels,
+    n_squares,
+    n_features,
+    device,
+    epochs,
+    batch_size,
+    learning_rate,
+    layer,
+):
     use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
     storage_dtype = torch.bfloat16 if use_bf16 else torch.float32
 
@@ -148,6 +178,14 @@ def _train_layer(x_train, train_labels, baseline_labels, n_squares, n_features, 
     baseline_labels = torch.as_tensor(baseline_labels, dtype=torch.long, device=device)
     targets = torch.stack((train_labels, baseline_labels), dim=1)
     class_weights = _class_weights(train_labels)
+
+    x_val = torch.as_tensor(x_val, dtype=torch.float32, device=device)
+    x_val = ((x_val - feature_mean) / feature_std).to(storage_dtype)
+    val_labels = torch.as_tensor(val_labels, dtype=torch.long, device=device)
+    val_rng = np.random.default_rng(RANDOM_STATE + layer + 1)
+    val_perm = torch.as_tensor(val_rng.permutation(len(val_labels)), dtype=torch.long, device=device)
+    val_baseline_labels = val_labels[val_perm]
+    val_targets = torch.stack((val_labels, val_baseline_labels), dim=1)
 
     model = BatchedLinearProbes(n_features, n_squares).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -170,7 +208,19 @@ def _train_layer(x_train, train_labels, baseline_labels, n_squares, n_features, 
 
         if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == epochs:
             mean_loss = total_loss / len(x_train)
-            print(f"Layer {layer + 1}, epoch {epoch + 1}/{epochs}, loss {mean_loss:.4f}")
+            val_loss = _evaluate_loss(
+                model,
+                x_val,
+                val_targets,
+                class_weights,
+                batch_size,
+                device,
+                use_bf16,
+            )
+            print(
+                f"Layer {layer + 1}, epoch {epoch + 1}/{epochs}, "
+                f"train loss {mean_loss:.4f}, val loss {val_loss:.4f}"
+            )
 
     state_dict = {name: value.detach().cpu() for name, value in model.state_dict().items()}
     return model, feature_mean, feature_std, state_dict, use_bf16
@@ -275,10 +325,13 @@ def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, 
     print(f"Training probes on {device} with {len(train_indices):,} train positions")
     for layer in range(n_layers):
         x_train = np.asarray(activations[train_indices, layer], dtype=np.float32)
+        x_val = np.asarray(activations[test_indices, layer], dtype=np.float32)
         model, feature_mean, feature_std, state_dict, use_bf16 = _train_layer(
             x_train,
             train_labels,
             baseline_labels,
+            x_val,
+            test_labels,
             n_squares,
             n_features,
             device,
@@ -287,11 +340,10 @@ def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, 
             learning_rate,
             layer,
         )
-        del x_train
+        del x_train, x_val
 
-        x_test = np.asarray(activations[test_indices, layer], dtype=np.float32)
         x_test = _prepare_test_activations(
-            x_test,
+            np.asarray(activations[test_indices, layer], dtype=np.float32),
             feature_mean,
             feature_std,
             device,
@@ -356,9 +408,19 @@ def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, 
     }
     _save_results(output_dir, results, checkpoint)
 
-    for layer, mean_accuracy in enumerate(np.nanmean(accuracies, axis=1), start=1):
-        print(f"Layer {layer} mean accuracy: {mean_accuracy:.4f}")
+    for layer, (mean_accuracy, mean_balanced) in enumerate(
+        zip(
+            np.nanmean(accuracies, axis=1),
+            np.nanmean(balanced_accuracies, axis=1),
+        ),
+        start=1,
+    ):
+        print(
+            f"Layer {layer} mean accuracy: {mean_accuracy:.4f} | "
+            f"balanced accuracy: {mean_balanced:.4f}"
+        )
     print(f"Mean baseline accuracy: {np.nanmean(baselines):.4f}")
+    print(f"Mean balanced accuracy: {np.nanmean(balanced_accuracies):.4f}")
 
     ply_means = np.nanmean(per_ply, axis=(0, 1))
     for (lower, upper), mean_accuracy in zip(PLY_BUCKETS, ply_means):
@@ -374,8 +436,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train CUDA linear probes on chess activations")
     parser.add_argument("--activations", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--device", default=None)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--device", default= 'cuda')
+    parser.add_argument("--epochs", type=int, default= 150)
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     args = parser.parse_args()

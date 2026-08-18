@@ -109,11 +109,13 @@ def load_best_checkpoint(model, optimizer):
     return load_checkpoint(find_best_checkpoint(), model, optimizer)
 
 
-def load_games(data_path: str | Path, min_plies: int = 0):
+def iter_games(data_path: str | Path, min_plies: int = 0):
     with Path(data_path).open("r", encoding="utf-8") as file:
-        return tuple(
-            game
-            for line in file
-            if (game := line.rstrip("\r\n"))
-            and len(game.split()) >= min_plies
-        )
+        for line in file:
+            game = line.rstrip("\r\n")
+            if game and (min_plies == 0 or len(game.split()) >= min_plies):
+                yield game
+
+
+def load_games(data_path: str | Path, min_plies: int = 0):
+    return tuple(iter_games(data_path, min_plies))

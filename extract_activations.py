@@ -1,3 +1,4 @@
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import torch
 from model import MoveFormerConfig, MoveFormerModel
 from project_utils import find_best_checkpoint, load_games, read_checkpoint, root_dir
 
-N_GAMES = 4000
+N_GAMES = 10000
 BATCH_SIZE = 256
 CONTEXT_LENGTH = 768
 MIN_GAME_PLIES = 51
@@ -120,7 +121,7 @@ def _make_hook(layer_index, captured_outputs):
     return hook
 
 
-def extract_activations():
+def extract_activations(output_dir=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, config, stoi, _ = _load_model(device)
     context_length = min(CONTEXT_LENGTH, config.block_size)
@@ -208,7 +209,9 @@ def extract_activations():
     plies = np.concatenate(ply_batches).astype(np.int16, copy=False)
     game_ids = np.concatenate(game_id_batches).astype(np.int32, copy=False)
 
-    output_path = root_dir() / OUTPUT_FILENAME
+    output_dir = Path(output_dir) if output_dir else root_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / OUTPUT_FILENAME
     np.savez_compressed(
         output_path,
         activations=activations,
@@ -228,5 +231,12 @@ def extract_activations():
     return output_path
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Extract MoveFormer activations for probing")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    args = parser.parse_args()
+    extract_activations(output_dir=args.output_dir)
+
+
 if __name__ == "__main__":
-    extract_activations()
+    main()

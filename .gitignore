@@ -10,3 +10,5 @@ validate_game.py
 
 pytest.ini
 activations.npz
+
+checkpoints/
