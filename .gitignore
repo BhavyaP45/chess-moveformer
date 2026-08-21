@@ -11,4 +11,7 @@ validate_game.py
 pytest.ini
 activations.npz
 
+.pytest_cache/
+
 checkpoints/
+results/
