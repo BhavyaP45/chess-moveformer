@@ -1,3 +1,4 @@
+import csv
 import warnings
 from pathlib import Path
 
@@ -12,6 +13,14 @@ from train_probes import (
     PLY_BUCKETS,
     load_probe_checkpoint,
 )
+
+INTERVENTION_SUMMARY_FILENAME = "causal_empty_intervention_summary_v4.csv"
+INTERVENTION_BAR_METRICS = (
+    ("plan_retention", "Plan Retention", "specificity_plan_retention"),
+    ("source_square_usage", "Source-Square Usage", "specificity_source_square_usage"),
+    ("legality", "Legality", "treatment_minus_control_legality"),
+)
+PRIMARY_INTERVENTION_SCALE = 1.0
 
 LEGALITY_RATES = {
     6: {1: 99.9140625, 5: 99.6328125, 10: 99.640625},
@@ -293,8 +302,16 @@ def compute_probe_balanced_accuracy_by_ply(
         raise ValueError("Activation file does not match the saved probe checkpoint")
     if labels.shape[1] != n_squares:
         raise ValueError("Label squares do not match the saved probe checkpoint")
-    if len(test_indices) == 0 or test_indices.max() >= len(labels):
-        raise ValueError("Probe split does not match the activation file")
+    n_positions = len(labels)
+    if len(test_indices) == 0 or test_indices.max() >= n_positions:
+        raise ValueError(
+            "Probe split does not match the activation file: "
+            f"n_positions={n_positions}, "
+            f"len(test_indices)={len(test_indices)}, "
+            f"test_indices.max()={int(test_indices.max()) if len(test_indices) else 'n/a'}. "
+            "Use the activations.npz that was used when training these probes, "
+            "or retrain probes on the current activations.npz."
+        )
 
     test_labels = labels[test_indices]
     test_plies = plies[test_indices]
@@ -383,8 +400,12 @@ def plot_probe_balanced_accuracy_by_ply(metrics_path=None, output_dir=None):
         colorbar = fig.colorbar(image, ax=ax)
         colorbar.set_label("Balanced Accuracy")
         heatmap_path = output_dir / "probe_balanced_accuracy_layer_ply_heatmap.pdf"
+        heatmap_png = heatmap_path.with_suffix(".png")
         fig.savefig(heatmap_path, format="pdf", bbox_inches="tight")
+        fig.savefig(heatmap_png, format="png", dpi=200, bbox_inches="tight")
         plt.close(fig)
+        print(f"Saved heatmap: {heatmap_path}", flush=True)
+        print(f"Saved heatmap: {heatmap_png}", flush=True)
 
         layer = per_square.shape[0] - 1
         layer_values = per_square[layer]
@@ -417,10 +438,95 @@ def plot_probe_balanced_accuracy_by_ply(metrics_path=None, output_dir=None):
         ax.legend(frameon=False)
         _minimal_axes(ax)
         line_path = output_dir / "probe_balanced_accuracy_layer6_by_ply.pdf"
+        line_png = line_path.with_suffix(".png")
         fig.savefig(line_path, format="pdf", bbox_inches="tight")
+        fig.savefig(line_png, format="png", dpi=200, bbox_inches="tight")
         plt.close(fig)
+        print(f"Saved line plot: {line_path}", flush=True)
+        print(f"Saved line plot: {line_png}", flush=True)
 
     return heatmap_path, line_path
+
+
+def _default_intervention_summary_path():
+    path = root_dir() / INTERVENTION_SUMMARY_FILENAME
+    if path.exists():
+        return path
+    raise FileNotFoundError(f"Intervention summary not found at {path}")
+
+
+def _primary_intervention_row(summary_path):
+    with Path(summary_path).open(encoding="utf-8", newline="") as file:
+        for row in csv.DictReader(file):
+            if (
+                row["scope"] == "all"
+                and float(row["scale"]) == PRIMARY_INTERVENTION_SCALE
+            ):
+                return row
+    raise ValueError(
+        f"No all-scope scale {PRIMARY_INTERVENTION_SCALE:g} row in {summary_path}"
+    )
+
+
+def plot_causal_empty_intervention(summary_path=None, output_dir=None):
+    summary_path = (
+        Path(summary_path) if summary_path else _default_intervention_summary_path()
+    )
+    output_dir = Path(output_dir) if output_dir else _figures_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    row = _primary_intervention_row(summary_path)
+
+    labels = [label for _, label, _ in INTERVENTION_BAR_METRICS]
+    treatment = [
+        float(row[f"treatment_{name}"]) for name, _, _ in INTERVENTION_BAR_METRICS
+    ]
+    control = [float(row[f"control_{name}"]) for name, _, _ in INTERVENTION_BAR_METRICS]
+    deltas = [float(row[delta_name]) for _, _, delta_name in INTERVENTION_BAR_METRICS]
+
+    x_values = np.arange(len(labels))
+    width = 0.36
+    with plt.rc_context(PLOT_STYLE):
+        fig, ax = plt.subplots(figsize=(4.8, 3.0), constrained_layout=True)
+        ax.bar(
+            x_values - width / 2,
+            treatment,
+            width,
+            color="#0072B2",
+            label="Treatment",
+        )
+        ax.bar(
+            x_values + width / 2,
+            control,
+            width,
+            color="#D55E00",
+            label="Control",
+        )
+        for x_value, left, right, delta in zip(x_values, treatment, control, deltas):
+            ax.annotate(
+                f"Δ {delta:+.2f} pp",
+                (x_value, max(left, right) + 2.2),
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
+        ax.set_xticks(x_values, labels)
+        ax.set_ylabel("Percentage")
+        ax.set_ylim(0, 100)
+        ax.set_title(
+            "Plan Retention, Source-Square Usage, and Legality "
+            "under Empty Intervention"
+        )
+        ax.legend(frameon=False)
+        _minimal_axes(ax)
+        output_path = output_dir / "causal_empty_intervention_scale1_bars.pdf"
+        png_path = output_path.with_suffix(".png")
+        fig.savefig(output_path, format="pdf", bbox_inches="tight")
+        fig.savefig(png_path, format="png", dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"Saved intervention bars: {output_path}", flush=True)
+    print(f"Saved intervention bars: {png_path}", flush=True)
+    return output_path
 
 
 def compute_and_plot_probe_balanced_accuracy_by_ply(**kwargs):
@@ -433,6 +539,16 @@ def main():
     legality_path = plot_legality_curve()
     print(f"Saved {loss_path}")
     print(f"Saved {legality_path}")
+    metrics_path = root_dir() / "probe_balanced_accuracy_by_ply.npz"
+    if metrics_path.exists():
+        heatmap_path, line_path = plot_probe_balanced_accuracy_by_ply(metrics_path)
+        print(f"Saved {heatmap_path}")
+        print(f"Saved {line_path}")
+    try:
+        intervention_path = plot_causal_empty_intervention()
+        print(f"Saved {intervention_path}")
+    except FileNotFoundError as error:
+        print(error)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,9 @@ from pathlib import Path
 from plots import (
     _balanced_accuracy_by_square_and_ply,
     _default_activation_path,
+    _primary_intervention_row,
     compute_probe_balanced_accuracy_by_ply,
+    plot_causal_empty_intervention,
     plot_probe_balanced_accuracy_by_ply,
 )
 from train_probes import BatchedLinearProbes
@@ -117,3 +119,30 @@ def test_compute_and_plot_probe_balanced_accuracy_by_ply(tmp_path):
     )
     assert heatmap_path.exists()
     assert line_path.exists()
+    assert line_path.name == "probe_balanced_accuracy_layer6_by_ply.pdf"
+
+
+def test_causal_empty_intervention_bar_plot_uses_scale_one_all_scope(tmp_path):
+    summary_path = tmp_path / "causal_empty_intervention_summary_v4.csv"
+    summary_path.write_text(
+        "scope,piece_class,scale,"
+        "treatment_plan_retention,control_plan_retention,"
+        "treatment_source_square_usage,control_source_square_usage,"
+        "treatment_forced_alternative,control_forced_alternative,"
+        "treatment_legality,control_legality,"
+        "specificity_plan_retention,specificity_source_square_usage,"
+        "specificity_forced_alternative,treatment_minus_control_legality\n"
+        "all,-1,0.5,72.1,78.3,76.7,82.2,23.3,17.8,95.7,97.3,6.2,5.5,5.5,-1.6\n"
+        "all,-1,1.0,61.825,69.075,67.546,74.469,32.454,25.531,93.825,95.375,7.25,6.92,6.92,-1.55\n"
+        "white pawn,1,1.0,70.8,76.8,73.4,79.0,26.6,21.0,96.8,97.8,6.0,5.6,5.6,-1.0\n",
+        encoding="utf-8",
+    )
+    row = _primary_intervention_row(summary_path)
+    assert float(row["treatment_plan_retention"]) == 61.825
+
+    output_path = plot_causal_empty_intervention(
+        summary_path, output_dir=tmp_path / "figures"
+    )
+    assert output_path.exists()
+    assert output_path.name == "causal_empty_intervention_scale1_bars.pdf"
+    assert output_path.with_suffix(".png").exists()
