@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from pathlib import Path
@@ -6,7 +7,9 @@ from pathlib import Path
 from plots import (
     _balanced_accuracy_by_square_and_ply,
     _default_activation_path,
-    _primary_intervention_row,
+    _load_intervention_pairs,
+    _primary_intervention_rows,
+    compute_intervention_confidence_intervals,
     compute_probe_balanced_accuracy_by_ply,
     plot_causal_empty_intervention,
     plot_probe_balanced_accuracy_by_ply,
@@ -122,27 +125,110 @@ def test_compute_and_plot_probe_balanced_accuracy_by_ply(tmp_path):
     assert line_path.name == "probe_balanced_accuracy_layer6_by_ply.pdf"
 
 
-def test_causal_empty_intervention_bar_plot_uses_scale_one_all_scope(tmp_path):
-    summary_path = tmp_path / "causal_empty_intervention_summary_v4.csv"
-    summary_path.write_text(
-        "scope,piece_class,scale,"
-        "treatment_plan_retention,control_plan_retention,"
-        "treatment_source_square_usage,control_source_square_usage,"
-        "treatment_forced_alternative,control_forced_alternative,"
-        "treatment_legality,control_legality,"
-        "specificity_plan_retention,specificity_source_square_usage,"
-        "specificity_forced_alternative,treatment_minus_control_legality\n"
-        "all,-1,0.5,72.1,78.3,76.7,82.2,23.3,17.8,95.7,97.3,6.2,5.5,5.5,-1.6\n"
-        "all,-1,1.0,61.825,69.075,67.546,74.469,32.454,25.531,93.825,95.375,7.25,6.92,6.92,-1.55\n"
-        "white pawn,1,1.0,70.8,76.8,73.4,79.0,26.6,21.0,96.8,97.8,6.0,5.6,5.6,-1.0\n",
-        encoding="utf-8",
+EXAMPLE_HEADER = (
+    "example_id,game_id,piece_class,piece,condition,scale,"
+    "plan_retention,source_square_usage,legal\n"
+)
+
+
+def _write_example_csv(path, rows):
+    path.write_text(EXAMPLE_HEADER + "".join(rows), encoding="utf-8")
+    return path
+
+
+def test_intervention_confidence_intervals_are_paired_deterministic_and_signed(
+    tmp_path,
+):
+    example_path = _write_example_csv(
+        tmp_path / "examples.csv",
+        [
+            "0,10,1,white pawn,treatment,1.0,False,False,False\n",
+            "0,10,1,white pawn,control,1.0,True,True,True\n",
+            "1,11,1,white pawn,treatment,1.0,True,True,True\n",
+            "1,11,1,white pawn,control,1.0,True,True,True\n",
+            "2,12,1,white pawn,treatment,1.0,False,False,True\n",
+            "2,12,1,white pawn,control,1.0,True,True,True\n",
+            "3,13,1,white pawn,treatment,1.0,True,False,True\n",
+            "3,13,1,white pawn,control,1.0,True,True,True\n",
+        ],
     )
-    row = _primary_intervention_row(summary_path)
-    assert float(row["treatment_plan_retention"]) == 61.825
+    first_csv, first_npz = compute_intervention_confidence_intervals(
+        example_path, tmp_path / "first", n_bootstrap=500, seed=42
+    )
+    second_csv, _ = compute_intervention_confidence_intervals(
+        example_path, tmp_path / "second", n_bootstrap=500, seed=42
+    )
+
+    assert first_npz.exists()
+    assert first_csv.read_text(encoding="utf-8") == second_csv.read_text(
+        encoding="utf-8"
+    )
+    primary = _primary_intervention_rows(first_csv)
+    source = primary["source_square_usage"]
+    assert float(source["treatment_percentage"]) == 25.0
+    assert float(source["control_percentage"]) == 100.0
+    assert float(source["treatment_minus_control_pp"]) == -75.0
+    assert float(source["ci_lower_pp"]) <= -75.0 <= float(
+        source["ci_upper_pp"]
+    )
 
     output_path = plot_causal_empty_intervention(
-        summary_path, output_dir=tmp_path / "figures"
+        first_csv, output_dir=tmp_path / "figures"
     )
     assert output_path.exists()
     assert output_path.name == "causal_empty_intervention_scale1_bars.pdf"
     assert output_path.with_suffix(".png").exists()
+
+
+@pytest.mark.parametrize(
+    "rows,error_text",
+    [
+        (
+            ["0,10,1,white pawn,treatment,1.0,True,True,True\n"],
+            "Missing control",
+        ),
+        (
+            [
+                "0,10,1,white pawn,treatment,1.0,True,True,True\n",
+                "0,10,1,white pawn,treatment,1.0,True,True,True\n",
+            ],
+            "Duplicate treatment",
+        ),
+        (
+            [
+                "0,10,1,white pawn,treatment,1.0,True,True,True\n",
+                "0,11,1,white pawn,control,1.0,True,True,True\n",
+            ],
+            "Mismatched game_id",
+        ),
+    ],
+)
+def test_intervention_pair_validation(tmp_path, rows, error_text):
+    example_path = _write_example_csv(tmp_path / "invalid.csv", rows)
+    with pytest.raises(ValueError, match=error_text):
+        _load_intervention_pairs(example_path)
+
+
+def test_scale_one_source_usage_recomputes_with_all_4000_positions():
+    example_path = (
+        Path(__file__).parents[1]
+        / "results"
+        / "causal_empty_intervention_examples_v4.csv"
+    )
+    records = [
+        record
+        for record in _load_intervention_pairs(example_path)
+        if record["scale"] == 1.0
+    ]
+
+    assert len(records) == 4000
+    treatment_count = sum(
+        record["treatment"]["source_square_usage"] for record in records
+    )
+    control_count = sum(
+        record["control"]["source_square_usage"] for record in records
+    )
+    assert treatment_count == 2535
+    assert control_count == 2841
+    assert 100.0 * treatment_count / len(records) == 63.375
+    assert 100.0 * control_count / len(records) == 71.025

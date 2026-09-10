@@ -288,7 +288,7 @@ def test_supported_selection_balances_piece_classes_or_reports_shortage():
         raise AssertionError("Expected shortages for missing piece classes")
 
 
-def test_paired_summary_uses_legal_denominator_and_specificity():
+def test_paired_summary_uses_common_denominator_and_specificity():
     sample = _position()
     treatment_move = sample.board.parse_san("d4")
     control_move = sample.greedy_move
@@ -306,7 +306,27 @@ def test_paired_summary_uses_legal_denominator_and_specificity():
     assert overall["control_plan_retention"] == 100.0
     assert overall["specificity_source_square_usage"] == 100.0
     assert overall["specificity_forced_alternative"] == 100.0
+    assert overall["treatment_minus_control_plan_retention"] == -100.0
+    assert overall["treatment_minus_control_source_square_usage"] == -100.0
     assert overall["treatment_legality"] == 100.0
+
+
+def test_illegal_move_is_neither_source_usage_nor_forced_alternative():
+    sample = _position()
+    rows = summarize_paired(
+        [sample],
+        [None],
+        [sample.greedy_move],
+        _geometry(),
+        _geometry(treatment=False),
+        scale=1.0,
+    )
+    overall = rows[0]
+
+    assert overall["treatment_source_square_usage"] == 0.0
+    assert overall["treatment_forced_alternative"] == 0.0
+    assert overall["treatment_legality"] == 0.0
+    assert overall["control_source_square_usage"] == 100.0
 
 
 def test_example_records_and_versioned_outputs(tmp_path):

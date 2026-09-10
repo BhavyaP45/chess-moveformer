@@ -15,12 +15,17 @@ from train_probes import (
 )
 
 INTERVENTION_SUMMARY_FILENAME = "causal_empty_intervention_summary_v4.csv"
+INTERVENTION_EXAMPLE_FILENAME = "causal_empty_intervention_examples_v4.csv"
+INTERVENTION_CI_FILENAME = "causal_empty_intervention_confidence_intervals_v4.csv"
+INTERVENTION_CI_NPZ_FILENAME = "causal_empty_intervention_confidence_intervals_v4.npz"
 INTERVENTION_BAR_METRICS = (
-    ("plan_retention", "Plan Retention", "specificity_plan_retention"),
-    ("source_square_usage", "Source-Square Usage", "specificity_source_square_usage"),
-    ("legality", "Legality", "treatment_minus_control_legality"),
+    ("plan_retention", "Plan Retention", "plan_retention"),
+    ("source_square_usage", "Source-Square Usage", "source_square_usage"),
+    ("legality", "Legality", "legal"),
 )
 PRIMARY_INTERVENTION_SCALE = 1.0
+DEFAULT_BOOTSTRAP_RESAMPLES = 10000
+DEFAULT_BOOTSTRAP_SEED = 42
 
 LEGALITY_RATES = {
     6: {1: 99.9140625, 5: 99.6328125, 10: 99.640625},
@@ -448,40 +453,274 @@ def plot_probe_balanced_accuracy_by_ply(metrics_path=None, output_dir=None):
     return heatmap_path, line_path
 
 
-def _default_intervention_summary_path():
-    path = root_dir() / INTERVENTION_SUMMARY_FILENAME
-    if path.exists():
-        return path
-    raise FileNotFoundError(f"Intervention summary not found at {path}")
+def _default_intervention_path(filename):
+    candidates = (root_dir() / filename, root_dir() / "results" / filename)
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        f"Intervention artifact {filename} not found at "
+        + " or ".join(str(path) for path in candidates)
+    )
 
 
-def _primary_intervention_row(summary_path):
-    with Path(summary_path).open(encoding="utf-8", newline="") as file:
+def _parse_csv_bool(value, field_name):
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1"}:
+        return True
+    if normalized in {"false", "0"}:
+        return False
+    raise ValueError(f"Invalid boolean {value!r} in field {field_name}")
+
+
+def _load_intervention_pairs(example_path):
+    paired = {}
+    with Path(example_path).open(encoding="utf-8", newline="") as file:
+        for row_number, row in enumerate(csv.DictReader(file), start=2):
+            try:
+                scale = float(row["scale"])
+                example_id = int(row["example_id"])
+                condition = row["condition"]
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Invalid intervention example row {row_number}"
+                ) from error
+            if condition not in {"treatment", "control"}:
+                raise ValueError(
+                    f"Unknown condition {condition!r} at row {row_number}"
+                )
+            key = (scale, example_id)
+            conditions = paired.setdefault(key, {})
+            if condition in conditions:
+                raise ValueError(
+                    f"Duplicate {condition} row for scale={scale:g}, "
+                    f"example_id={example_id}"
+                )
+            conditions[condition] = row
+
+    records = []
+    for (scale, example_id), conditions in sorted(paired.items()):
+        missing = {"treatment", "control"} - set(conditions)
+        if missing:
+            raise ValueError(
+                f"Missing {', '.join(sorted(missing))} row for "
+                f"scale={scale:g}, example_id={example_id}"
+            )
+        treatment = conditions["treatment"]
+        control = conditions["control"]
+        for field in ("game_id", "piece_class", "piece"):
+            if treatment[field] != control[field]:
+                raise ValueError(
+                    f"Mismatched {field} for scale={scale:g}, "
+                    f"example_id={example_id}"
+                )
+        records.append(
+            {
+                "scale": scale,
+                "example_id": example_id,
+                "game_id": int(treatment["game_id"]),
+                "piece_class": int(treatment["piece_class"]),
+                "piece": treatment["piece"],
+                "treatment": {
+                    name: _parse_csv_bool(treatment[csv_field], csv_field)
+                    for name, _label, csv_field in INTERVENTION_BAR_METRICS
+                },
+                "control": {
+                    name: _parse_csv_bool(control[csv_field], csv_field)
+                    for name, _label, csv_field in INTERVENTION_BAR_METRICS
+                },
+            }
+        )
+    if not records:
+        raise ValueError(f"No paired intervention examples found in {example_path}")
+    return records
+
+
+def _bootstrap_confidence_rows(
+    records, scope, piece_class, scale, n_bootstrap, seed
+):
+    game_ids = np.asarray([record["game_id"] for record in records], dtype=np.int64)
+    unique_games, game_inverse = np.unique(game_ids, return_inverse=True)
+    cluster_counts = np.bincount(game_inverse).astype(np.int64)
+    metric_names = [name for name, _label, _csv_field in INTERVENTION_BAR_METRICS]
+    treatment = np.asarray(
+        [
+            [record["treatment"][name] for name in metric_names]
+            for record in records
+        ],
+        dtype=np.float64,
+    )
+    control = np.asarray(
+        [
+            [record["control"][name] for name in metric_names]
+            for record in records
+        ],
+        dtype=np.float64,
+    )
+    differences = treatment - control
+    cluster_difference_sums = np.stack(
+        [
+            np.bincount(game_inverse, weights=differences[:, column])
+            for column in range(len(metric_names))
+        ],
+        axis=1,
+    )
+
+    rng = np.random.default_rng(seed)
+    bootstrap_differences = np.empty(
+        (n_bootstrap, len(metric_names)), dtype=np.float64
+    )
+    chunk_size = 256
+    for start in range(0, n_bootstrap, chunk_size):
+        stop = min(start + chunk_size, n_bootstrap)
+        sampled_clusters = rng.integers(
+            0,
+            len(unique_games),
+            size=(stop - start, len(unique_games)),
+        )
+        sampled_counts = cluster_counts[sampled_clusters].sum(axis=1)
+        sampled_sums = cluster_difference_sums[sampled_clusters].sum(axis=1)
+        bootstrap_differences[start:stop] = (
+            100.0 * sampled_sums / sampled_counts[:, None]
+        )
+
+    lower = np.percentile(bootstrap_differences, 2.5, axis=0)
+    upper = np.percentile(bootstrap_differences, 97.5, axis=0)
+    rows = []
+    for column, name in enumerate(metric_names):
+        rows.append(
+            {
+                "scope": scope,
+                "piece_class": piece_class,
+                "scale": scale,
+                "metric": name,
+                "n_pairs": len(records),
+                "treatment_percentage": 100.0 * treatment[:, column].mean(),
+                "control_percentage": 100.0 * control[:, column].mean(),
+                "treatment_minus_control_pp": 100.0
+                * differences[:, column].mean(),
+                "ci_lower_pp": float(lower[column]),
+                "ci_upper_pp": float(upper[column]),
+                "bootstrap_seed": seed,
+                "n_bootstrap": n_bootstrap,
+            }
+        )
+    return rows
+
+
+def _save_confidence_rows(rows, output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / INTERVENTION_CI_FILENAME
+    npz_path = output_dir / INTERVENTION_CI_NPZ_FILENAME
+    fieldnames = list(rows[0])
+    with csv_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    np.savez_compressed(
+        npz_path,
+        **{field: np.asarray([row[field] for row in rows]) for field in fieldnames},
+    )
+    return csv_path, npz_path
+
+
+def compute_intervention_confidence_intervals(
+    example_path=None,
+    output_dir=None,
+    n_bootstrap=DEFAULT_BOOTSTRAP_RESAMPLES,
+    seed=DEFAULT_BOOTSTRAP_SEED,
+):
+    if n_bootstrap <= 0:
+        raise ValueError("n_bootstrap must be positive")
+    example_path = (
+        Path(example_path)
+        if example_path
+        else _default_intervention_path(INTERVENTION_EXAMPLE_FILENAME)
+    )
+    output_dir = Path(output_dir) if output_dir else example_path.parent
+    records = _load_intervention_pairs(example_path)
+    rows = []
+    scales = sorted({record["scale"] for record in records})
+    piece_classes = sorted(
+        {(record["piece_class"], record["piece"]) for record in records}
+    )
+    for scale in scales:
+        scale_records = [record for record in records if record["scale"] == scale]
+        rows.extend(
+            _bootstrap_confidence_rows(
+                scale_records, "all", -1, scale, n_bootstrap, seed
+            )
+        )
+        for piece_class, piece in piece_classes:
+            scoped_records = [
+                record
+                for record in scale_records
+                if record["piece_class"] == piece_class
+            ]
+            if scoped_records:
+                rows.extend(
+                    _bootstrap_confidence_rows(
+                        scoped_records,
+                        piece,
+                        piece_class,
+                        scale,
+                        n_bootstrap,
+                        seed,
+                    )
+                )
+    paths = _save_confidence_rows(rows, output_dir)
+    for path in paths:
+        print(f"Saved intervention confidence intervals: {path}", flush=True)
+    return paths
+
+
+def _primary_intervention_rows(confidence_path):
+    selected = {}
+    with Path(confidence_path).open(encoding="utf-8", newline="") as file:
         for row in csv.DictReader(file):
             if (
                 row["scope"] == "all"
                 and float(row["scale"]) == PRIMARY_INTERVENTION_SCALE
             ):
-                return row
-    raise ValueError(
-        f"No all-scope scale {PRIMARY_INTERVENTION_SCALE:g} row in {summary_path}"
-    )
+                selected[row["metric"]] = row
+    expected = {name for name, _label, _csv_field in INTERVENTION_BAR_METRICS}
+    missing = expected - set(selected)
+    if missing:
+        raise ValueError(
+            f"Missing primary confidence rows for {sorted(missing)} in "
+            f"{confidence_path}"
+        )
+    return selected
 
 
-def plot_causal_empty_intervention(summary_path=None, output_dir=None):
-    summary_path = (
-        Path(summary_path) if summary_path else _default_intervention_summary_path()
+def plot_causal_empty_intervention(confidence_path=None, output_dir=None):
+    confidence_path = (
+        Path(confidence_path)
+        if confidence_path
+        else _default_intervention_path(INTERVENTION_CI_FILENAME)
     )
     output_dir = Path(output_dir) if output_dir else _figures_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
-    row = _primary_intervention_row(summary_path)
+    rows = _primary_intervention_rows(confidence_path)
 
-    labels = [label for _, label, _ in INTERVENTION_BAR_METRICS]
+    labels = [label for _name, label, _csv_field in INTERVENTION_BAR_METRICS]
     treatment = [
-        float(row[f"treatment_{name}"]) for name, _, _ in INTERVENTION_BAR_METRICS
+        float(rows[name]["treatment_percentage"])
+        for name, _label, _csv_field in INTERVENTION_BAR_METRICS
     ]
-    control = [float(row[f"control_{name}"]) for name, _, _ in INTERVENTION_BAR_METRICS]
-    deltas = [float(row[delta_name]) for _, _, delta_name in INTERVENTION_BAR_METRICS]
+    control = [
+        float(rows[name]["control_percentage"])
+        for name, _label, _csv_field in INTERVENTION_BAR_METRICS
+    ]
+    deltas = [
+        float(rows[name]["treatment_minus_control_pp"])
+        for name, _label, _csv_field in INTERVENTION_BAR_METRICS
+    ]
+    intervals = [
+        (float(rows[name]["ci_lower_pp"]), float(rows[name]["ci_upper_pp"]))
+        for name, _label, _csv_field in INTERVENTION_BAR_METRICS
+    ]
 
     x_values = np.arange(len(labels))
     width = 0.36
@@ -501,17 +740,20 @@ def plot_causal_empty_intervention(summary_path=None, output_dir=None):
             color="#D55E00",
             label="Control",
         )
-        for x_value, left, right, delta in zip(x_values, treatment, control, deltas):
+        for x_value, left, right, delta, interval in zip(
+            x_values, treatment, control, deltas, intervals
+        ):
             ax.annotate(
-                f"Δ {delta:+.2f} pp",
+                f"Delta {delta:+.2f} pp\n"
+                f"95% CI [{interval[0]:+.2f}, {interval[1]:+.2f}]",
                 (x_value, max(left, right) + 2.2),
                 ha="center",
                 va="bottom",
-                fontsize=7,
+                fontsize=6.5,
             )
         ax.set_xticks(x_values, labels)
         ax.set_ylabel("Percentage")
-        ax.set_ylim(0, 100)
+        ax.set_ylim(0, 112)
         ax.set_title(
             "Plan Retention, Source-Square Usage, and Legality "
             "under Empty Intervention"
@@ -545,7 +787,11 @@ def main():
         print(f"Saved {heatmap_path}")
         print(f"Saved {line_path}")
     try:
-        intervention_path = plot_causal_empty_intervention()
+        try:
+            confidence_path = _default_intervention_path(INTERVENTION_CI_FILENAME)
+        except FileNotFoundError:
+            confidence_path, _ = compute_intervention_confidence_intervals()
+        intervention_path = plot_causal_empty_intervention(confidence_path)
         print(f"Saved {intervention_path}")
     except FileNotFoundError as error:
         print(error)

@@ -766,13 +766,18 @@ def _legal_metrics(samples, moves, mask):
     )
     source_usage = np.array(
         [
-            move.from_square == sample.source_square
+            move is not None and move.from_square == sample.source_square
             for sample, move in zip(chosen_samples, chosen_moves)
-            if move is not None
         ],
         dtype=bool,
     )
-    forced_alternative = ~source_usage
+    forced_alternative = np.array(
+        [
+            move is not None and move.from_square != sample.source_square
+            for sample, move in zip(chosen_samples, chosen_moves)
+        ],
+        dtype=bool,
+    )
     return {
         "legality": _percentage(legal),
         "plan_retention": _percentage(retained),
@@ -831,6 +836,12 @@ def summarize_paired(
         )
         row["specificity_forced_alternative"] = (
             treatment["forced_alternative"] - control["forced_alternative"]
+        )
+        row["treatment_minus_control_plan_retention"] = (
+            treatment["plan_retention"] - control["plan_retention"]
+        )
+        row["treatment_minus_control_source_square_usage"] = (
+            treatment["source_square_usage"] - control["source_square_usage"]
         )
         row["treatment_minus_control_legality"] = (
             treatment["legality"] - control["legality"]
