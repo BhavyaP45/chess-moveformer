@@ -2,6 +2,25 @@
 
 Chess MoveFormer is an independent machine-learning interpretability project studying the robustness and causal role of the implicit board-state representations learned by a small decoder-only transformer trained only on chess text.
 
+**Contents**
+
+- [AI-assisted code development](#ai-assisted-code-development)
+- [Main contributions](#main-contributions)
+- [Research status](#research-status)
+- [Repository map](#repository-map)
+- [How the pieces fit together](#how-the-pieces-fit-together)
+- [Setup](#setup)
+- [Google Colab workflow](#google-colab-workflow)
+- [Testing](#testing)
+- [Reproducibility notes](#reproducibility-notes)
+- [Research lineage](#research-lineage)
+- [Responsible use and current limitations](#responsible-use-and-current-limitations)
+- [License and citation](#license-and-citation)
+
+## AI-assisted code development
+
+AI coding assistants were used to generate and revise portions of this codebase. GPT-5.6 Sol was used for the majority of AI-assisted code generation, while Grok 4.6 through Cursor was used to a smaller extent. The author reviewed, modified where necessary, and tested the AI-assisted code, and remains responsible for the final implementation and research results.
+
 The model receives no board tensor, piece list, legal-move generator, or chess engine signal. Its only training objective is next-character prediction over games written as space-separated Standard Algebraic Notation (SAN):
 
 ```text
