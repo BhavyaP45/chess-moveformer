@@ -4,22 +4,19 @@ Chess MoveFormer is an independent machine-learning interpretability project stu
 
 **Contents**
 
-- [AI-assisted code development](#ai-assisted-code-development)
+- [Project overview](#project-overview)
 - [Main contributions](#main-contributions)
 - [Research status](#research-status)
-- [Repository map](#repository-map)
-- [How the pieces fit together](#how-the-pieces-fit-together)
+- [AI-assisted code development](#ai-assisted-code-development)
+- [Repository structure](#repository-structure)
 - [Setup](#setup)
-- [Google Colab workflow](#google-colab-workflow)
 - [Testing](#testing)
 - [Reproducibility notes](#reproducibility-notes)
 - [Research lineage](#research-lineage)
 - [Responsible use and current limitations](#responsible-use-and-current-limitations)
 - [License and citation](#license-and-citation)
 
-## AI-assisted code development
-
-AI coding assistants were used to generate and revise portions of this codebase. GPT-5.6 Sol was used for the majority of AI-assisted code generation, while Grok 4.6 through Cursor was used to a smaller extent. The author reviewed, modified where necessary, and tested the AI-assisted code, and remains responsible for the final implementation and research results.
+## Project overview
 
 The model receives no board tensor, piece list, legal-move generator, or chess engine signal. Its only training objective is next-character prediction over games written as space-separated Standard Algebraic Notation (SAN):
 
@@ -51,7 +48,11 @@ This is an active research project being prepared for a paper. The repository do
 
 Until then, the code is best read as a transparent description of the experimental design rather than as a results release.
 
-## Repository map
+## AI-assisted code development
+
+AI coding assistants were used to generate and revise portions of this codebase. GPT-5.6 Sol was used for the majority of AI-assisted code generation, while Grok 4.6 through Cursor was used to a smaller extent. The author reviewed, modified where necessary, and tested the AI-assisted code, and remains responsible for the final implementation and research results.
+
+## Repository structure
 
 ```text
 chess-moveformer/
@@ -69,7 +70,7 @@ chess-moveformer/
 └── tests/                            Unit tests for the data and research pipeline
 ```
 
-## How the pieces fit together
+### Experimental pipeline
 
 ```text
 Lichess PGN exports
@@ -200,7 +201,7 @@ Shared helpers centralize:
 
 ## Setup
 
-The project is designed for Python 3.10+ and PyTorch. Install its dependencies in a virtual environment or Colab runtime:
+The project is designed for Python 3.10+ and PyTorch. Install its dependencies in a virtual environment:
 
 ```bash
 pip install torch numpy matplotlib python-chess zstandard tqdm python-dotenv pytest
@@ -231,20 +232,9 @@ $ROOT_DIR/
 
 Large corpora, checkpoints, activations, result directories, and `.env` are excluded by the current `.gitignore`. Other generated probe and figure artifacts should also be reviewed before committing.
 
-## Google Colab workflow
+### Running the experimental pipeline
 
-Mount Drive before importing modules that resolve project paths:
-
-```python
-from google.colab import drive
-drive.mount("/content/drive")
-```
-
-Then run from the repository root:
-
-```python
-%cd /path/to/chess-moveformer
-```
+Run these commands from the repository root after completing the setup above.
 
 Train the language model:
 
@@ -309,7 +299,7 @@ The tests cover corpus preparation, checkpoint selection, legality evaluation, a
 - The language-model validation split is deterministic by corpus order; stochastic batches are sampled during evaluation.
 - Probe splitting is performed at game level with a fixed random seed.
 - Checkpoint filenames encode both step and validation loss.
-- `ROOT_DIR` controls all research artifact paths, which keeps the same code usable locally and in Google Drive.
+- `ROOT_DIR` controls all research artifact paths, which keeps the same code usable across development environments.
 - Evaluation and intervention scripts expect their inputs to have been produced from compatible model checkpoints and vocabulary mappings.
 
 ## Research lineage
@@ -322,7 +312,7 @@ A formal bibliography, complete experimental specification, quantitative results
 
 ## Responsible use and current limitations
 
-This repository is research code rather than a chess engine or production training framework. Generated SAN can be syntactically malformed or illegal, saved artifacts can be large, and several experiments are GPU-oriented. Review configuration values and run small smoke tests before launching full Colab jobs.
+This repository is research code rather than a chess engine or production training framework. Generated SAN can be syntactically malformed or illegal, saved artifacts can be large, and several experiments are GPU-oriented. Review configuration values and run small smoke tests before launching full experiment runs.
 
 ## License and citation
 
