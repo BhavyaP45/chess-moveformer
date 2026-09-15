@@ -1,7 +1,30 @@
 import numpy as np
 import pytest
 
-from train_probes import load_probe_checkpoint, predict_probe, train_probes
+from train_probes import (
+    _relative_labels,
+    load_probe_checkpoint,
+    predict_probe,
+    train_probes,
+)
+
+
+def test_relative_labels_follow_player_to_move():
+    labels = np.array(
+        [
+            [0, 1, 5, 7, 11],
+            [0, 1, 5, 7, 11],
+        ],
+        dtype=np.int8,
+    )
+    plies = np.array([2, 3], dtype=np.int16)
+
+    relative = _relative_labels(labels, plies)
+
+    assert relative.tolist() == [
+        [0, 1, 5, 7, 11],
+        [0, 7, 11, 1, 5],
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -54,19 +77,26 @@ def trained_probes(tmp_path_factory):
 
 def test_primary_result_shapes(trained_probes):
     output_dir, _, _, n_layers, n_squares, _ = trained_probes
-    assert np.load(output_dir / "probe_accuracies.npy").shape == (n_layers, n_squares)
+    assert np.load(output_dir / "probe_accuracies.npy").shape == (
+        n_layers,
+        2,
+        n_squares,
+    )
     assert np.load(output_dir / "probe_accuracies_per_class.npy").shape == (
         n_layers,
+        2,
         n_squares,
         13,
     )
     assert np.load(output_dir / "probe_accuracies_per_ply.npy").shape == (
         n_layers,
+        2,
         n_squares,
         6,
     )
     assert np.load(output_dir / "probe_baseline_accuracies.npy").shape == (
         n_layers,
+        2,
         n_squares,
     )
 
@@ -97,15 +127,18 @@ def test_saved_probes_have_expected_count_and_can_predict(trained_probes):
     checkpoint = load_probe_checkpoint(checkpoint_path)
     assert len(checkpoint["layers"]) * checkpoint["n_squares"] == n_layers * n_squares
     assert checkpoint["layers"][0]["state_dict"]["linear.weight"].shape == (
-        2 * n_squares * 13,
+        2 * 2 * n_squares * 13,
         n_features,
     )
+    assert checkpoint["target_encoding"] == "player_relative"
+    assert checkpoint["turn_names"] == ("white", "black")
 
     prediction = predict_probe(
         checkpoint_path,
         np.zeros((1, n_features), dtype=np.float32),
         layer=0,
         square=0,
+        player_to_move="white",
     )
     assert prediction.shape == (1,)
 
@@ -114,11 +147,13 @@ def test_support_counts_are_saved(trained_probes):
     output_dir, _, _, n_layers, n_squares, _ = trained_probes
     assert np.load(output_dir / "probe_support_per_class.npy").shape == (
         n_layers,
+        2,
         n_squares,
         13,
     )
     assert np.load(output_dir / "probe_support_per_ply.npy").shape == (
         n_layers,
+        2,
         n_squares,
         6,
     )

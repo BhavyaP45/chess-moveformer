@@ -11,6 +11,9 @@ from train_probes import (
     BatchedLinearProbes,
     N_PIECE_CLASSES,
     PLY_BUCKETS,
+    _relative_labels,
+    _select_turn_bank,
+    _turn_indices,
     load_probe_checkpoint,
 )
 
@@ -207,6 +210,7 @@ def _predict_saved_probe_layer(
     checkpoint,
     activations,
     test_indices,
+    plies,
     layer,
     device,
     batch_size,
@@ -227,6 +231,7 @@ def _predict_saved_probe_layer(
         dtype=np.int8,
     )
     use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
+    turns = _turn_indices(plies[test_indices])
 
     with torch.inference_mode():
         for start in range(0, len(test_indices), batch_size):
@@ -241,7 +246,15 @@ def _predict_saved_probe_layer(
                 dtype=torch.bfloat16,
                 enabled=use_bf16,
             ):
-                batch_predictions = model(inputs).argmax(dim=-1)
+                batch_turns = torch.as_tensor(
+                    turns[start : start + len(indices)],
+                    dtype=torch.long,
+                    device=device,
+                )
+                batch_predictions = _select_turn_bank(
+                    model(inputs),
+                    batch_turns,
+                ).argmax(dim=-1)
             predictions[start : start + len(indices)] = (
                 batch_predictions.cpu().numpy()
             )
@@ -318,7 +331,8 @@ def compute_probe_balanced_accuracy_by_ply(
             "or retrain probes on the current activations.npz."
         )
 
-    test_labels = labels[test_indices]
+    relative_labels = _relative_labels(labels, plies)
+    test_labels = relative_labels[test_indices]
     test_plies = plies[test_indices]
     shape = (n_layers, n_squares, len(PLY_BUCKETS))
     real_balanced = np.full(shape, np.nan, dtype=np.float32)
@@ -334,6 +348,7 @@ def compute_probe_balanced_accuracy_by_ply(
             checkpoint,
             activations,
             test_indices,
+            plies,
             layer,
             device,
             batch_size,

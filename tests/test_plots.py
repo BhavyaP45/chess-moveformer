@@ -84,6 +84,9 @@ def test_compute_and_plot_probe_balanced_accuracy_by_ply(tmp_path):
             "n_squares": n_squares,
             "n_features": n_features,
             "n_classes": 13,
+            "n_turns": 2,
+            "turn_names": ("white", "black"),
+            "target_encoding": "player_relative",
         },
         checkpoint_path,
     )

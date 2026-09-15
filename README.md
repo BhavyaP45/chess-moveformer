@@ -176,7 +176,7 @@ Square labels use 13 classes: empty plus six white and six black piece types. Ac
 
 ### `train_probes.py`: linear decoding
 
-The probe experiment asks whether board contents are linearly recoverable from hidden states and whether that representation changes with game depth. It trains probes for each transformer layer and each board square, mapping the residual vector to one of 13 square-state classes: empty, six white piece types, or six black piece types.
+The probe experiment asks whether board contents are linearly recoverable from hidden states and whether that representation changes with game depth. It trains separate White-to-move and Black-to-move probe banks for each transformer layer and board square. Both banks use the same 13 player-relative square-state classes: empty, six piece types belonging to the player to move, and six belonging to the opponent.
 
 The train/test split is made by game rather than by individual position, preventing positions from the same game from leaking across the split. The script records ordinary accuracy, balanced accuracy, per-class behavior, ply-bucket behavior, support counts, and a shuffled-label baseline. Probe weights and the exact split are saved for later analysis.
 
