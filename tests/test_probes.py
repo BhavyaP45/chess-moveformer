@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
+import torch
 
 from train_probes import (
+    BatchedNonlinearProbes,
     _relative_labels,
     load_probe_checkpoint,
     predict_probe,
@@ -126,9 +128,14 @@ def test_saved_probes_have_expected_count_and_can_predict(trained_probes):
     checkpoint_path = output_dir / "probe_weights.pt"
     checkpoint = load_probe_checkpoint(checkpoint_path)
     assert len(checkpoint["layers"]) * checkpoint["n_squares"] == n_layers * n_squares
-    assert checkpoint["layers"][0]["state_dict"]["linear.weight"].shape == (
-        2 * 2 * n_squares * 13,
+    assert checkpoint["probe_architecture"] == "one_hidden_layer_mlp"
+    assert checkpoint["layers"][0]["state_dict"]["banks.0.0.input.weight"].shape == (
+        checkpoint["hidden_dim"],
         n_features,
+    )
+    assert checkpoint["layers"][0]["state_dict"]["banks.0.0.output.weight"].shape == (
+        n_squares * 13,
+        checkpoint["hidden_dim"],
     )
     assert checkpoint["target_encoding"] == "player_relative"
     assert checkpoint["turn_names"] == ("white", "black")
@@ -141,6 +148,16 @@ def test_saved_probes_have_expected_count_and_can_predict(trained_probes):
         player_to_move="white",
     )
     assert prediction.shape == (1,)
+
+
+def test_nonlinear_probe_output_shape():
+    model = BatchedNonlinearProbes(
+        n_features=6,
+        n_squares=4,
+        hidden_dim=8,
+    )
+    output = model(torch.zeros(3, 6))
+    assert output.shape == (3, 2, 2, 4, 13)
 
 
 def test_support_counts_are_saved(trained_probes):

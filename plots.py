@@ -8,7 +8,7 @@ import torch
 
 from project_utils import checkpoint_dir, checkpoint_metadata, read_checkpoint, root_dir
 from train_probes import (
-    BatchedLinearProbes,
+    BatchedNonlinearProbes,
     N_PIECE_CLASSES,
     PLY_BUCKETS,
     _relative_labels,
@@ -216,9 +216,10 @@ def _predict_saved_probe_layer(
     batch_size,
 ):
     n_squares = checkpoint["n_squares"]
-    model = BatchedLinearProbes(
+    model = BatchedNonlinearProbes(
         checkpoint["n_features"],
         n_squares,
+        checkpoint["hidden_dim"],
         checkpoint["n_classes"],
     ).to(device)
     layer_state = checkpoint["layers"][layer]

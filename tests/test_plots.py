@@ -14,7 +14,7 @@ from plots import (
     plot_causal_empty_intervention,
     plot_probe_balanced_accuracy_by_ply,
 )
-from train_probes import BatchedLinearProbes
+from train_probes import BatchedNonlinearProbes
 
 
 def test_balanced_accuracy_by_square_and_ply_averages_class_recalls():
@@ -68,7 +68,11 @@ def test_compute_and_plot_probe_balanced_accuracy_by_ply(tmp_path):
 
     layers = []
     for _ in range(n_layers):
-        model = BatchedLinearProbes(n_features, n_squares)
+        model = BatchedNonlinearProbes(
+            n_features,
+            n_squares,
+            hidden_dim=8,
+        )
         layers.append(
             {
                 "state_dict": model.state_dict(),
@@ -84,6 +88,9 @@ def test_compute_and_plot_probe_balanced_accuracy_by_ply(tmp_path):
             "n_squares": n_squares,
             "n_features": n_features,
             "n_classes": 13,
+            "probe_architecture": "one_hidden_layer_mlp",
+            "hidden_dim": 8,
+            "activation": "GELU",
             "n_turns": 2,
             "turn_names": ("white", "black"),
             "target_encoding": "player_relative",

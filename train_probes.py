@@ -31,29 +31,73 @@ RELATIVE_CLASS_NAMES = (
     "opponent queen",
     "opponent king",
 )
+DEFAULT_HIDDEN_DIM = 256
 PLY_BUCKETS = ((1, 10), (11, 20), (21, 30), (31, 40), (41, 50), (51, None))
 
 
-class BatchedLinearProbes(nn.Module):
-    """Turn-specific real and shuffled-label linear probes for every square."""
+class PlayerRelativeMLPProbe(nn.Module):
+    """One nonlinear board-state probe for a fixed player-to-move condition."""
 
-    def __init__(self, n_features, n_squares, n_classes=N_PIECE_CLASSES):
+    def __init__(
+        self,
+        n_features,
+        n_squares,
+        hidden_dim,
+        n_classes=N_PIECE_CLASSES,
+    ):
         super().__init__()
         self.n_squares = n_squares
         self.n_classes = n_classes
-        self.linear = nn.Linear(
-            n_features,
-            N_TURNS * 2 * n_squares * n_classes,
+        self.input = nn.Linear(n_features, hidden_dim)
+        self.activation = nn.GELU()
+        self.output = nn.Linear(hidden_dim, n_squares * n_classes)
+
+    def forward(self, activations):
+        logits = self.output(self.activation(self.input(activations)))
+        return logits.reshape(-1, self.n_squares, self.n_classes)
+
+
+class BatchedNonlinearProbes(nn.Module):
+    """Two turn-specific MLP probes and their shuffled-label controls."""
+
+    def __init__(
+        self,
+        n_features,
+        n_squares,
+        hidden_dim=DEFAULT_HIDDEN_DIM,
+        n_classes=N_PIECE_CLASSES,
+    ):
+        super().__init__()
+        self.n_squares = n_squares
+        self.n_classes = n_classes
+        self.hidden_dim = hidden_dim
+        self.banks = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        PlayerRelativeMLPProbe(
+                            n_features,
+                            n_squares,
+                            hidden_dim,
+                            n_classes,
+                        )
+                        for _branch in range(2)
+                    ]
+                )
+                for _turn in range(N_TURNS)
+            ]
         )
 
     def forward(self, activations):
-        logits = self.linear(activations)
-        return logits.reshape(
-            -1,
-            N_TURNS,
-            2,
-            self.n_squares,
-            self.n_classes,
+        return torch.stack(
+            [
+                torch.stack(
+                    [probe(activations) for probe in turn_bank],
+                    dim=1,
+                )
+                for turn_bank in self.banks
+            ],
+            dim=1,
         )
 
 
@@ -254,6 +298,7 @@ def _train_layer(
     batch_size,
     learning_rate,
     layer,
+    hidden_dim,
 ):
     use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
     storage_dtype = torch.bfloat16 if use_bf16 else torch.float32
@@ -284,7 +329,11 @@ def _train_layer(
     )
     val_targets = torch.stack((val_labels, val_baseline_labels), dim=1)
 
-    model = BatchedLinearProbes(n_features, n_squares).to(device)
+    model = BatchedNonlinearProbes(
+        n_features,
+        n_squares,
+        hidden_dim,
+    ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     generator = torch.Generator(device=device).manual_seed(RANDOM_STATE + layer)
 
@@ -370,9 +419,10 @@ def predict_probe(
         checkpoint = load_probe_checkpoint(checkpoint, map_location=device)
 
     device = torch.device(device)
-    model = BatchedLinearProbes(
+    model = BatchedNonlinearProbes(
         checkpoint["n_features"],
         checkpoint["n_squares"],
+        checkpoint["hidden_dim"],
         checkpoint["n_classes"],
     ).to(device)
     layer_state = checkpoint["layers"][layer]
@@ -395,7 +445,15 @@ def predict_probe(
     return predictions.cpu().numpy()
 
 
-def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, batch_size=8192, learning_rate=1e-3):
+def train_probes(
+    activation_path=None,
+    output_dir=None,
+    device=None,
+    epochs=50,
+    batch_size=8192,
+    learning_rate=1e-3,
+    hidden_dim=DEFAULT_HIDDEN_DIM,
+):
     start_time = time.perf_counter()
     activation_path = Path(activation_path) if activation_path else root_dir() / "activations.npz"
     output_dir = Path(output_dir) if output_dir else root_dir()
@@ -473,6 +531,7 @@ def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, 
             batch_size,
             learning_rate,
             layer,
+            hidden_dim,
         )
         del x_train, x_val
 
@@ -556,6 +615,9 @@ def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, 
         "n_squares": n_squares,
         "n_features": n_features,
         "n_classes": N_PIECE_CLASSES,
+        "probe_architecture": "one_hidden_layer_mlp",
+        "hidden_dim": hidden_dim,
+        "activation": "GELU",
         "n_turns": N_TURNS,
         "turn_names": TURN_NAMES,
         "target_encoding": "player_relative",
@@ -568,6 +630,7 @@ def train_probes(activation_path=None, output_dir=None, device=None, epochs=50, 
             "epochs": epochs,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
+            "hidden_dim": hidden_dim,
         },
     }
     _save_results(output_dir, results, checkpoint)
@@ -604,6 +667,7 @@ def main():
     parser.add_argument("--epochs", type=int, default= 150)
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--hidden-dim", type=int, default=DEFAULT_HIDDEN_DIM)
     args = parser.parse_args()
     train_probes(
         args.activations,
@@ -612,6 +676,7 @@ def main():
         args.epochs,
         args.batch_size,
         args.learning_rate,
+        args.hidden_dim,
     )
 
 
