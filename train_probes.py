@@ -32,6 +32,9 @@ RELATIVE_CLASS_NAMES = (
     "opponent king",
 )
 DEFAULT_HIDDEN_DIM = 256
+DEFAULT_OUTPUT_SUBDIRECTORY = "nonlinear_probe_results"
+VALIDATION_GAME_FRACTION = 0.1
+TEST_GAME_FRACTION = 0.2
 PLY_BUCKETS = ((1, 10), (11, 20), (21, 30), (31, 40), (41, 50), (51, None))
 
 
@@ -148,18 +151,39 @@ def _validate_arrays(activations, labels, plies, game_ids):
         raise ValueError("activations, labels, plies, and game_ids must contain the same positions")
     if labels.size and (labels.min() < 0 or labels.max() >= N_PIECE_CLASSES):
         raise ValueError(f"labels must be integers from 0 to {N_PIECE_CLASSES - 1}")
-    if np.unique(game_ids).size < 2:
-        raise ValueError("At least two games are required for a game-level train/test split")
+    if np.unique(game_ids).size < 3:
+        raise ValueError(
+            "At least three games are required for game-level train, "
+            "validation, and test splits"
+        )
 
 
-def _group_split(game_ids, test_size=0.2):
+def _group_split(
+    game_ids,
+    validation_size=VALIDATION_GAME_FRACTION,
+    test_size=TEST_GAME_FRACTION,
+):
     unique_games = np.unique(game_ids)
     rng = np.random.default_rng(RANDOM_STATE)
     shuffled_games = rng.permutation(unique_games)
-    n_test_games = min(max(1, round(len(unique_games) * test_size)), len(unique_games) - 1)
+    n_test_games = max(1, round(len(unique_games) * test_size))
+    n_validation_games = max(1, round(len(unique_games) * validation_size))
+    if n_test_games + n_validation_games >= len(unique_games):
+        raise ValueError(
+            "The validation and test fractions must leave at least one training game"
+        )
     test_games = shuffled_games[:n_test_games]
+    validation_games = shuffled_games[
+        n_test_games : n_test_games + n_validation_games
+    ]
     test_mask = np.isin(game_ids, test_games)
-    return np.flatnonzero(~test_mask), np.flatnonzero(test_mask)
+    validation_mask = np.isin(game_ids, validation_games)
+    train_mask = ~(test_mask | validation_mask)
+    return (
+        np.flatnonzero(train_mask),
+        np.flatnonzero(validation_mask),
+        np.flatnonzero(test_mask),
+    )
 
 
 def _ply_mask(plies, lower, upper):
@@ -222,7 +246,7 @@ def _class_weights(labels, turns):
     return weights
 
 
-def _weighted_loss(logits, targets, class_weights, turns):
+def _weighted_loss_components(logits, targets, class_weights, turns):
     losses = F.cross_entropy(
         logits.reshape(-1, N_PIECE_CLASSES),
         targets.reshape(-1),
@@ -235,10 +259,12 @@ def _weighted_loss(logits, targets, class_weights, turns):
         -1,
     )
     sample_weights = expanded_weights.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    return (losses * sample_weights).sum() / sample_weights.sum()
+    weighted_sums = (losses * sample_weights).sum(dim=(0, 2))
+    weight_sums = sample_weights.sum(dim=(0, 2))
+    return weighted_sums, weight_sums
 
 
-def _evaluate_loss(
+def _evaluate_losses(
     model,
     activations,
     targets,
@@ -248,8 +274,8 @@ def _evaluate_loss(
     device,
     use_bf16,
 ):
-    total_loss = 0.0
-    total_weight = 0
+    total_weighted_sums = torch.zeros(2, dtype=torch.float64, device=device)
+    total_weight_sums = torch.zeros(2, dtype=torch.float64, device=device)
     model.eval()
     with torch.inference_mode():
         for start in range(0, len(activations), batch_size):
@@ -258,16 +284,16 @@ def _evaluate_loss(
             batch_turns = turns[start:start + batch_size]
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                 logits = _select_turn_bank(model(batch), batch_turns)
-                loss = _weighted_loss(
+                weighted_sums, weight_sums = _weighted_loss_components(
                     logits,
                     batch_targets,
                     class_weights,
                     batch_turns,
                 )
-            total_loss += loss.item() * len(batch)
-            total_weight += len(batch)
+            total_weighted_sums += weighted_sums.double()
+            total_weight_sums += weight_sums.double()
     model.train()
-    return total_loss / max(total_weight, 1)
+    return (total_weighted_sums / total_weight_sums).cpu().numpy()
 
 
 def _predict(model, activations, turns, batch_size, device, use_bf16):
@@ -336,11 +362,24 @@ def _train_layer(
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     generator = torch.Generator(device=device).manual_seed(RANDOM_STATE + layer)
+    best_epoch = None
+    best_real_val_loss = float("inf")
+    best_val_losses = None
+    best_state_dict = None
 
     model.train()
     for epoch in range(epochs):
         permutation = torch.randperm(len(x_train), generator=generator, device=device)
-        total_loss = 0.0
+        train_weighted_sums = torch.zeros(
+            2,
+            dtype=torch.float64,
+            device=device,
+        )
+        train_weight_sums = torch.zeros(
+            2,
+            dtype=torch.float64,
+            device=device,
+        )
 
         for start in range(0, len(x_train), batch_size):
             indices = permutation[start:start + batch_size]
@@ -348,35 +387,56 @@ def _train_layer(
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                 batch_turns = train_turns[indices]
                 logits = _select_turn_bank(model(x_train[indices]), batch_turns)
-                loss = _weighted_loss(
+                weighted_sums, weight_sums = _weighted_loss_components(
                     logits,
                     targets[indices],
                     class_weights,
                     batch_turns,
                 )
+                loss = (weighted_sums / weight_sums).mean()
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * len(indices)
+            train_weighted_sums += weighted_sums.detach().double()
+            train_weight_sums += weight_sums.detach().double()
 
-        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == epochs:
-            mean_loss = total_loss / len(x_train)
-            val_loss = _evaluate_loss(
-                model,
-                x_val,
-                val_targets,
-                val_turns,
-                class_weights,
-                batch_size,
-                device,
-                use_bf16,
-            )
-            print(
-                f"Layer {layer + 1}, epoch {epoch + 1}/{epochs}, "
-                f"train loss {mean_loss:.4f}, val loss {val_loss:.4f}"
-            )
+        train_losses = (train_weighted_sums / train_weight_sums).cpu().numpy()
+        val_losses = _evaluate_losses(
+            model,
+            x_val,
+            val_targets,
+            val_turns,
+            class_weights,
+            batch_size,
+            device,
+            use_bf16,
+        )
+        if val_losses[0] < best_real_val_loss:
+            best_epoch = epoch + 1
+            best_real_val_loss = float(val_losses[0])
+            best_val_losses = val_losses.copy()
+            best_state_dict = {
+                name: value.detach().cpu().clone()
+                for name, value in model.state_dict().items()
+            }
+        print(
+            f"Layer {layer + 1}, epoch {epoch + 1}/{epochs} | "
+            f"train real {train_losses[0]:.4f}, "
+            f"shuffled {train_losses[1]:.4f} | "
+            f"val real {val_losses[0]:.4f}, "
+            f"shuffled {val_losses[1]:.4f} | "
+            f"best real epoch {best_epoch}"
+        )
 
-    state_dict = {name: value.detach().cpu() for name, value in model.state_dict().items()}
-    return model, feature_mean, feature_std, state_dict, use_bf16
+    model.load_state_dict(best_state_dict)
+    return (
+        model,
+        feature_mean,
+        feature_std,
+        best_state_dict,
+        use_bf16,
+        best_epoch,
+        best_val_losses,
+    )
 
 
 def _prepare_test_activations(activations, feature_mean, feature_std, device, use_bf16):
@@ -397,6 +457,7 @@ def _save_results(output_dir, results, checkpoint):
     np.savez(
         output_dir / "probe_split.npz",
         train_indices=results["train_indices"],
+        validation_indices=results["validation_indices"],
         test_indices=results["test_indices"],
     )
     torch.save(checkpoint, output_dir / "probe_weights.pt")
@@ -454,9 +515,15 @@ def train_probes(
     learning_rate=1e-3,
     hidden_dim=DEFAULT_HIDDEN_DIM,
 ):
+    if epochs < 1:
+        raise ValueError(f"epochs must be at least 1, got {epochs}")
     start_time = time.perf_counter()
     activation_path = Path(activation_path) if activation_path else root_dir() / "activations.npz"
-    output_dir = Path(output_dir) if output_dir else root_dir()
+    output_dir = (
+        Path(output_dir)
+        if output_dir
+        else root_dir() / DEFAULT_OUTPUT_SUBDIRECTORY
+    )
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
@@ -477,9 +544,19 @@ def train_probes(
     _validate_arrays(activations, labels, plies, game_ids)
     n_positions, n_layers, n_features = activations.shape
     n_squares = labels.shape[1]
-    train_indices, test_indices = _group_split(game_ids)
-    if np.intersect1d(game_ids[train_indices], game_ids[test_indices]).size:
-        raise RuntimeError("Game-level split leaked a game between training and testing")
+    train_indices, validation_indices, test_indices = _group_split(game_ids)
+    split_game_sets = (
+        set(game_ids[train_indices]),
+        set(game_ids[validation_indices]),
+        set(game_ids[test_indices]),
+    )
+    if any(
+        split_game_sets[left] & split_game_sets[right]
+        for left, right in ((0, 1), (0, 2), (1, 2))
+    ):
+        raise RuntimeError(
+            "Game-level split leaked a game across training, validation, or test"
+        )
 
     rng = np.random.default_rng(RANDOM_STATE)
     relative_labels = _relative_labels(labels, plies)
@@ -487,6 +564,8 @@ def train_probes(
     train_labels = relative_labels[train_indices]
     train_turns = turns[train_indices]
     baseline_labels = _shuffle_within_turns(train_labels, train_turns, rng)
+    validation_labels = relative_labels[validation_indices]
+    validation_turns = turns[validation_indices]
     test_labels = relative_labels[test_indices]
     test_turns = turns[test_indices]
     test_plies = plies[test_indices]
@@ -512,18 +591,33 @@ def train_probes(
     baselines = np.full_like(accuracies, np.nan)
     layer_checkpoints = []
 
-    print(f"Training probes on {device} with {len(train_indices):,} train positions")
+    print(
+        f"Training probes on {device} with {len(train_indices):,} train, "
+        f"{len(validation_indices):,} validation, and "
+        f"{len(test_indices):,} test positions"
+    )
     for layer in range(n_layers):
         x_train = np.asarray(activations[train_indices, layer], dtype=np.float32)
-        x_val = np.asarray(activations[test_indices, layer], dtype=np.float32)
-        model, feature_mean, feature_std, state_dict, use_bf16 = _train_layer(
+        x_val = np.asarray(
+            activations[validation_indices, layer],
+            dtype=np.float32,
+        )
+        (
+            model,
+            feature_mean,
+            feature_std,
+            state_dict,
+            use_bf16,
+            best_epoch,
+            best_val_losses,
+        ) = _train_layer(
             x_train,
             train_labels,
             baseline_labels,
             train_turns,
             x_val,
-            test_labels,
-            test_turns,
+            validation_labels,
+            validation_turns,
             n_squares,
             n_features,
             device,
@@ -589,6 +683,11 @@ def train_probes(
                 "state_dict": state_dict,
                 "feature_mean": feature_mean.cpu(),
                 "feature_std": feature_std.cpu(),
+                "best_epoch": best_epoch,
+                "best_real_validation_loss": float(best_val_losses[0]),
+                "shuffled_validation_loss_at_best_epoch": float(
+                    best_val_losses[1]
+                ),
             }
         )
 
@@ -607,6 +706,7 @@ def train_probes(
         "ply_support": ply_support,
         "baselines": baselines,
         "train_indices": train_indices,
+        "validation_indices": validation_indices,
         "test_indices": test_indices,
     }
     checkpoint = {
@@ -624,7 +724,10 @@ def train_probes(
         "class_names": RELATIVE_CLASS_NAMES,
         "random_state": RANDOM_STATE,
         "train_indices": train_indices,
+        "validation_indices": validation_indices,
         "test_indices": test_indices,
+        "validation_game_fraction": VALIDATION_GAME_FRACTION,
+        "test_game_fraction": TEST_GAME_FRACTION,
         "hyperparameters": {
             "optimizer": "Adam",
             "epochs": epochs,
@@ -660,11 +763,13 @@ def train_probes(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train CUDA linear probes on chess activations")
+    parser = argparse.ArgumentParser(
+        description="Train player-relative nonlinear probes on chess activations"
+    )
     parser.add_argument("--activations", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--device", default= 'cuda')
-    parser.add_argument("--epochs", type=int, default= 150)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=DEFAULT_HIDDEN_DIM)

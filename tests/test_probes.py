@@ -54,7 +54,7 @@ def trained_probes(tmp_path_factory):
         ],
         axis=1,
     ).astype(np.int8)
-    plies = np.tile([5, 15, 25, 35, 45, 55], n_games).astype(np.int16)
+    plies = np.tile([5, 16, 25, 36, 45, 56], n_games).astype(np.int16)
     game_ids = np.repeat(np.arange(n_games), positions_per_game).astype(np.int32)
 
     output_dir = tmp_path_factory.mktemp("probe_results")
@@ -119,8 +119,11 @@ def test_reported_accuracies_are_valid_probabilities(trained_probes):
 def test_split_keeps_games_independent(trained_probes):
     _, results, game_ids, _, _, _ = trained_probes
     train_games = set(game_ids[results["train_indices"]])
+    validation_games = set(game_ids[results["validation_indices"]])
     test_games = set(game_ids[results["test_indices"]])
+    assert train_games.isdisjoint(validation_games)
     assert train_games.isdisjoint(test_games)
+    assert validation_games.isdisjoint(test_games)
 
 
 def test_saved_probes_have_expected_count_and_can_predict(trained_probes):
@@ -139,6 +142,10 @@ def test_saved_probes_have_expected_count_and_can_predict(trained_probes):
     )
     assert checkpoint["target_encoding"] == "player_relative"
     assert checkpoint["turn_names"] == ("white", "black")
+    assert all(
+        1 <= layer["best_epoch"] <= checkpoint["hyperparameters"]["epochs"]
+        for layer in checkpoint["layers"]
+    )
 
     prediction = predict_probe(
         checkpoint_path,
@@ -174,3 +181,6 @@ def test_support_counts_are_saved(trained_probes):
         n_squares,
         6,
     )
+
+    with np.load(output_dir / "probe_split.npz") as split:
+        assert "validation_indices" in split

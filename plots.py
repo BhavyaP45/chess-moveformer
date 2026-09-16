@@ -9,6 +9,7 @@ import torch
 from project_utils import checkpoint_dir, checkpoint_metadata, read_checkpoint, root_dir
 from train_probes import (
     BatchedNonlinearProbes,
+    DEFAULT_OUTPUT_SUBDIRECTORY,
     N_PIECE_CLASSES,
     PLY_BUCKETS,
     _relative_labels,
@@ -288,9 +289,15 @@ def compute_probe_balanced_accuracy_by_ply(
         Path(activation_path) if activation_path else _default_activation_path()
     )
     checkpoint_path = (
-        Path(checkpoint_path) if checkpoint_path else drive_dir / "probe_weights.pt"
+        Path(checkpoint_path)
+        if checkpoint_path
+        else drive_dir / DEFAULT_OUTPUT_SUBDIRECTORY / "probe_weights.pt"
     )
-    split_path = Path(split_path) if split_path else drive_dir / "probe_split.npz"
+    split_path = (
+        Path(split_path)
+        if split_path
+        else drive_dir / DEFAULT_OUTPUT_SUBDIRECTORY / "probe_split.npz"
+    )
     output_path = (
         Path(output_path)
         if output_path
