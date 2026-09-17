@@ -16,7 +16,7 @@ from project_utils import (
 @dataclass
 class TrainingConfig:
     batch_size: int = 128
-    max_iters: int = 300000
+    max_iters: int = 25000
     eval_interval: int = 500
     learning_rate: float = 3e-4
     eval_iters: int = 200
