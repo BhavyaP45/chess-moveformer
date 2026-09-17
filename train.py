@@ -15,9 +15,8 @@ from project_utils import (
 
 @dataclass
 class TrainingConfig:
-    batch_size: int = 8
-    gradient_accumulation_steps: int = 8
-    max_iters: int = 15000
+    batch_size: int = 128
+    max_iters: int = 300000
     eval_interval: int = 500
     learning_rate: float = 3e-4
     eval_iters: int = 200
@@ -117,15 +116,15 @@ def train():
             val_loss = losses["val"].item()
             print(f"step {step}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
-            save_checkpoint(model, optimizer, step, train_loss, val_loss, checkpoint_config)
+            if step == training_config.max_iters - 1:
+                save_checkpoint(model, optimizer, step, train_loss, val_loss, checkpoint_config)
 
         optimizer.zero_grad(set_to_none=True)
 
-        for _ in range(training_config.gradient_accumulation_steps):
-            inputs, targets = get_batch("train")
-            _, loss = model(inputs, targets)
-            loss = loss / training_config.gradient_accumulation_steps
-            loss.backward()
+        inputs, targets = get_batch("train")
+        _, loss = model(inputs, targets)
+        loss = loss
+        loss.backward()
 
         optimizer.step()
 

@@ -51,6 +51,7 @@ def _load_model(device):
 
 
 def _board_labels(board: chess.Board) -> np.ndarray:
+    # (64)
     labels = np.zeros(64, dtype=np.int8)
 
     for square in chess.SQUARES:
@@ -147,6 +148,7 @@ def extract_activations(output_dir=None):
             for batch_number, start in enumerate(range(0, len(games), BATCH_SIZE), start=1):
                 batch = games[start:start + BATCH_SIZE]
                 max_length = max(len(game.tokens) for game in batch)
+                #(B, C)
                 cpu_tokens = torch.zeros(
                     (len(batch), max_length),
                     dtype=torch.long,
@@ -157,6 +159,7 @@ def extract_activations(output_dir=None):
                 boundary_positions = []
                 for row, game in enumerate(batch):
                     cpu_tokens[row, :len(game.tokens)] = torch.tensor(game.tokens, dtype=torch.long)
+                    #For every boundary pos, add corresponding row index as element 
                     batch_rows.extend([row] * len(game.boundary_positions))
                     boundary_positions.extend(game.boundary_positions.tolist())
 
@@ -164,8 +167,13 @@ def extract_activations(output_dir=None):
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                     model(input_tokens)
 
+                #Total Boundary Pos = N
+                #(N)
                 row_indices = torch.tensor(batch_rows, dtype=torch.long, device=device)
                 position_indices = torch.tensor(boundary_positions, dtype=torch.long, device=device)
+
+                #Each output: (N, n_embd)
+                #Stack: (N, n_layer, n_embd)
                 layer_activations = torch.stack(
                     [
                         output[row_indices, position_indices]
@@ -203,7 +211,7 @@ def extract_activations(output_dir=None):
     finally:
         for hook in hooks:
             hook.remove()
-
+    #(N_Batches * N, n_layer, n_embd)
     activations = np.concatenate(activation_batches).astype(np.float16, copy=False)
     labels = np.concatenate(label_batches).astype(np.int8, copy=False)
     plies = np.concatenate(ply_batches).astype(np.int16, copy=False)
